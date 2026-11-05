@@ -1,26 +1,74 @@
 @import "tailwindcss";
 
+/*
+  Permitayo design tokens (Phase 1).
+  Civic navy as the primary, a warm gold accent, and neutral slate surfaces.
+*/
+@theme {
+  --color-brand-50: #eef4fb;
+  --color-brand-100: #d9e6f6;
+  --color-brand-200: #b5cded;
+  --color-brand-300: #86abdd;
+  --color-brand-400: #5486ca;
+  --color-brand-500: #2f66b3;
+  --color-brand-600: #1f4f95;
+  --color-brand-700: #183f78;
+  --color-brand-800: #14335f;
+  --color-brand-900: #0f2748;
+  --color-brand-950: #0a1b33;
+
+  --color-gold-100: #fdf2cf;
+  --color-gold-300: #f8d672;
+  --color-gold-400: #f5c451;
+  --color-gold-500: #e9ab1d;
+  --color-gold-600: #c98a0c;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+
+  --shadow-card: 0 1px 2px rgb(15 39 72 / 0.05), 0 1px 3px rgb(15 39 72 / 0.06);
+  --shadow-raised: 0 4px 6px -1px rgb(15 39 72 / 0.08),
+    0 12px 24px -8px rgb(15 39 72 / 0.12);
+}
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f6f8fb;
+  --foreground: #0f172a;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  color-scheme: light;
+  scroll-behavior: smooth;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--color-brand-200);
+  color: var(--color-brand-950);
+}
+
+/* Visible keyboard focus everywhere */
+:focus-visible {
+  outline: 2px solid var(--color-brand-500);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
