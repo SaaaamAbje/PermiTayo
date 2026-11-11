@@ -1,5 +1,5 @@
 /**
- * Hand-written types for the Phase 2 schema (supabase/migrations).
+ * Hand-written types for the Phase 2 and Phase 3 schema (supabase/migrations).
  * Replace with generated types (`supabase gen types typescript`) once a
  * project is linked; the shape below matches that output.
  */
@@ -12,6 +12,61 @@ export type DbRole =
   | "administrator";
 
 export type AccountStatus = "active" | "inactive" | "suspended" | "pending";
+
+export type OwnershipType = "sole_proprietorship" | "partnership" | "corporation" | "cooperative" | "other";
+export type EstablishmentStatus = "not_yet_operating" | "operating" | "temporarily_closed" | "permanently_closed";
+export type BusinessRecordStatus = "pending_verification" | "active" | "inactive";
+export type DbApplicationStatus = "draft" | "submitted" | "cancelled";
+
+/** Columns an applicant may write on business_establishments (enforced by column grants). */
+export type BusinessWritable = {
+  registered_business_name: string;
+  trade_name: string | null;
+  business_description: string | null;
+  business_type: string;
+  ownership_type: OwnershipType;
+  business_category: string;
+  business_email: string | null;
+  business_contact_number: string;
+  province: string;
+  municipality: string;
+  barangay: string;
+  street_address: string | null;
+  zip_code: string;
+  owner_full_name: string;
+  owner_email: string | null;
+  owner_contact_number: string;
+  nature_of_business: string;
+  employee_count: number;
+  estimated_capital: number | null;
+  establishment_status: EstablishmentStatus;
+  date_established: string | null;
+};
+
+/** Columns an applicant may write on permit_applications while it is a draft. */
+export type ApplicationWritable = {
+  business_id: string;
+  permit_type_id: string;
+  business_name: string | null;
+  business_address: string | null;
+  nature_of_business: string | null;
+  business_category: string | null;
+  applicant_remarks: string | null;
+};
+
+/** Frozen copy stored on submission (see submit_permit_application). */
+export type SubmissionSnapshot = {
+  applicant: { full_name: string; email: string; phone_number: string | null };
+  permit_type: { name: string; application_code: string };
+  business: Omit<BusinessWritable, "estimated_capital"> & {
+    id: string;
+    business_reference_number: string;
+    record_status: BusinessRecordStatus;
+    estimated_capital: number | string | null;
+    created_at: string;
+    updated_at: string;
+  };
+};
 
 export type Database = {
   public: {
@@ -106,6 +161,125 @@ export type Database = {
           },
         ];
       };
+      permit_types: {
+        Row: {
+          id: string;
+          name: string;
+          description: string | null;
+          application_code: string;
+          is_active: boolean;
+          sort_order: number;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: { name: string; application_code: string; description?: string | null; is_active?: boolean; sort_order?: number };
+        Update: { name?: string; description?: string | null; is_active?: boolean; sort_order?: number };
+        Relationships: [];
+      };
+      business_establishments: {
+        Row: BusinessWritable & {
+          id: string;
+          owner_id: string;
+          business_reference_number: string;
+          record_status: BusinessRecordStatus;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: Partial<BusinessWritable> &
+          Pick<
+            BusinessWritable,
+            | "registered_business_name"
+            | "business_type"
+            | "ownership_type"
+            | "business_category"
+            | "business_contact_number"
+            | "barangay"
+            | "zip_code"
+            | "owner_full_name"
+            | "owner_contact_number"
+            | "nature_of_business"
+            | "establishment_status"
+          >;
+        Update: Partial<BusinessWritable>;
+        Relationships: [
+          {
+            foreignKeyName: "business_establishments_owner_id_fkey";
+            columns: ["owner_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      permit_applications: {
+        Row: ApplicationWritable & {
+          id: string;
+          reference_number: string | null;
+          applicant_id: string;
+          application_status: DbApplicationStatus;
+          submission_snapshot: SubmissionSnapshot | null;
+          cancellation_reason: string | null;
+          cancelled_by: string | null;
+          submitted_at: string | null;
+          cancelled_at: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: Partial<ApplicationWritable> & Pick<ApplicationWritable, "business_id" | "permit_type_id">;
+        Update: Partial<ApplicationWritable>;
+        Relationships: [
+          {
+            foreignKeyName: "permit_applications_business_id_fkey";
+            columns: ["business_id"];
+            isOneToOne: false;
+            referencedRelation: "business_establishments";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "permit_applications_permit_type_id_fkey";
+            columns: ["permit_type_id"];
+            isOneToOne: false;
+            referencedRelation: "permit_types";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "permit_applications_applicant_id_fkey";
+            columns: ["applicant_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      application_status_history: {
+        Row: {
+          id: string;
+          application_id: string;
+          previous_status: DbApplicationStatus | null;
+          new_status: DbApplicationStatus;
+          changed_by: string | null;
+          remarks: string | null;
+          created_at: string;
+        };
+        Insert: never;
+        Update: never;
+        Relationships: [
+          {
+            foreignKeyName: "application_status_history_application_id_fkey";
+            columns: ["application_id"];
+            isOneToOne: false;
+            referencedRelation: "permit_applications";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "application_status_history_changed_by_fkey";
+            columns: ["changed_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
     };
     Views: { [_ in never]: never };
     Functions: {
@@ -117,6 +291,9 @@ export type Database = {
         Returns: undefined;
       };
       admin_remove_department_assignment: { Args: { p_member: string }; Returns: undefined };
+      submit_permit_application: { Args: { p_application: string }; Returns: string };
+      cancel_permit_application: { Args: { p_application: string; p_reason?: string | null }; Returns: undefined };
+      set_business_record_status: { Args: { p_business: string; p_status: string }; Returns: undefined };
     };
     Enums: { [_ in never]: never };
     CompositeTypes: { [_ in never]: never };

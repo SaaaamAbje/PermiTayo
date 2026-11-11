@@ -503,6 +503,432 @@ await test("storage: bucket is private; applicants can use only their own folder
 });
 
 // ---------------------------------------------------------------------------
+// G. Phase 3: business profiles and permit applications
+// ---------------------------------------------------------------------------
+const owner1 = await makeUser("owner1");
+const owner2 = await makeUser("owner2");
+const bplo3 = await makeUser("bplo3", { role: "bplo_personnel" });
+const admin3 = await makeUser("admin3", { role: "administrator" });
+const deptStaff3 = await makeUser("dept3", { role: "department_personnel" });
+
+const permitType = async (code) => (await q(`select id from public.permit_types where application_code = $1`, [code]))[0].id;
+const NEW_TYPE = await permitType("NEW");
+const RENEWAL_TYPE = await permitType("RENEWAL");
+
+const businessFields = (overrides = {}) => ({
+  registered_business_name: "Sample Sari-Sari Store",
+  business_type: "Retail",
+  ownership_type: "sole_proprietorship",
+  business_category: "Retail trade",
+  business_contact_number: "09171234567",
+  barangay: "Poblacion A",
+  zip_code: "4225",
+  owner_full_name: "Juan Dela Cruz",
+  owner_contact_number: "09171234567",
+  nature_of_business: "Retail of household goods",
+  employee_count: 2,
+  establishment_status: "operating",
+  ...overrides,
+});
+
+/** Insert a business as the given applicant through the API role. Returns the row. */
+async function createBusiness(userId, overrides = {}) {
+  const f = businessFields(overrides);
+  const cols = Object.keys(f);
+  const rows = await as(userId, () =>
+    q(
+      `insert into public.business_establishments (${cols.join(", ")}) values (${cols.map((_, i) => `$${i + 1}`).join(", ")})
+       returning id, owner_id, business_reference_number, record_status, municipality, province`,
+      Object.values(f),
+    ),
+  );
+  return rows[0];
+}
+
+async function createDraft(userId, businessId, typeId = NEW_TYPE, extra = {}) {
+  const f = {
+    business_id: businessId,
+    permit_type_id: typeId,
+    business_name: "Sample Sari-Sari Store",
+    business_address: "Poblacion A, Rosario, Batangas 4225",
+    nature_of_business: "Retail of household goods",
+    business_category: "Retail trade",
+    ...extra,
+  };
+  const cols = Object.keys(f);
+  const rows = await as(userId, () =>
+    q(
+      `insert into public.permit_applications (${cols.join(", ")}) values (${cols.map((_, i) => `$${i + 1}`).join(", ")})
+       returning id, applicant_id, application_status, reference_number`,
+      Object.values(f),
+    ),
+  );
+  return rows[0];
+}
+
+const submit = (userId, appId) => as(userId, async () => (await q(`select public.submit_permit_application($1) as ref`, [appId]))[0].ref);
+
+let biz1; // owner1's business
+let biz2; // owner2's business
+
+await test("P3-1. applicant can create a business profile; owner and reference are set by the server", async () => {
+  biz1 = await createBusiness(owner1);
+  eq(biz1.owner_id, owner1, "owner_id defaults to the caller");
+  assert(/^BUS-\d{4}-\d{6}$/.test(biz1.business_reference_number), `reference format: ${biz1.business_reference_number}`);
+  eq(biz1.record_status, "pending_verification", "default record status");
+  eq(biz1.municipality, "Rosario");
+  eq(biz1.province, "Batangas");
+  eq(await auditCount("business.created", biz1.id), 1);
+  biz2 = await createBusiness(owner2, { registered_business_name: "Other Owner Bakery" });
+});
+
+await test("P3-1. an applicant can register several businesses", async () => {
+  const extra = await createBusiness(owner1, { registered_business_name: "Second Shop" });
+  assert(extra.business_reference_number !== biz1.business_reference_number, "unique business references");
+  eq(await as(owner1, () => count(`select 1 from public.business_establishments`)), 2);
+});
+
+await test("P3-12. applicants cannot set owner, reference number or record status when creating", async () => {
+  await as(owner1, async () => {
+    await rejects(
+      () => db.query(`insert into public.business_establishments (owner_id, registered_business_name, business_type, ownership_type, business_category, business_contact_number, barangay, zip_code, owner_full_name, owner_contact_number, nature_of_business, establishment_status) values ($1,'Spoof','Retail','other','Retail','09171234567','Poblacion','4225','X Y','09171234567','Retail','operating')`, [owner2]),
+      /permission denied/,
+      "owner_id",
+    );
+    await rejects(
+      () => db.query(`insert into public.business_establishments (business_reference_number, registered_business_name, business_type, ownership_type, business_category, business_contact_number, barangay, zip_code, owner_full_name, owner_contact_number, nature_of_business, establishment_status) values ('BUS-2026-999999','Spoof','Retail','other','Retail','09171234567','Poblacion','4225','X Y','09171234567','Retail','operating')`),
+      /permission denied/,
+      "reference",
+    );
+    await rejects(
+      () => db.query(`insert into public.business_establishments (record_status, registered_business_name, business_type, ownership_type, business_category, business_contact_number, barangay, zip_code, owner_full_name, owner_contact_number, nature_of_business, establishment_status) values ('active','Spoof','Retail','other','Retail','09171234567','Poblacion','4225','X Y','09171234567','Retail','operating')`),
+      /permission denied/,
+      "record_status",
+    );
+  });
+});
+
+await test("P3-14. invalid business data is rejected by database constraints", async () => {
+  await rejects(() => createBusiness(owner1, { zip_code: "42A5" }), /business_zip_format/);
+  await rejects(() => createBusiness(owner1, { business_contact_number: "12345" }), /business_contact_format/);
+  await rejects(() => createBusiness(owner1, { employee_count: -1 }), /business_employee_count_range/);
+  await rejects(() => createBusiness(owner1, { ownership_type: "empire" }), /business_ownership_type_allowed/);
+  await rejects(() => createBusiness(owner1, { business_email: "not-an-email" }), /business_email_format/);
+});
+
+await test("P3-2. applicant can edit their own business profile", async () => {
+  const res = await as(owner1, () =>
+    db.query(`update public.business_establishments set trade_name = 'Juan''s Store', employee_count = 3 where id = $1`, [biz1.id]),
+  );
+  eq(res.affectedRows, 1);
+  eq((await q(`select trade_name from public.business_establishments where id = $1`, [biz1.id]))[0].trade_name, "Juan's Store");
+  eq(await auditCount("business.updated", biz1.id), 1);
+});
+
+await test("P3-3. applicant cannot view or edit another applicant's business", async () => {
+  await as(owner1, async () => {
+    eq(await count(`select 1 from public.business_establishments where id = $1`, [biz2.id]), 0, "not visible");
+    const res = await db.query(`update public.business_establishments set trade_name = 'Hacked' where id = $1`, [biz2.id]);
+    eq(res.affectedRows, 0, "update affects nothing");
+  });
+  assert((await q(`select trade_name from public.business_establishments where id = $1`, [biz2.id]))[0].trade_name !== "Hacked");
+});
+
+await test("P3-12. applicants cannot transfer ownership or change reference/record status of their business", async () => {
+  await as(owner1, async () => {
+    await rejects(() => db.query(`update public.business_establishments set owner_id = $1 where id = $2`, [owner2, biz1.id]), /permission denied/, "owner");
+    await rejects(() => db.query(`update public.business_establishments set business_reference_number = 'BUS-2026-000999' where id = $1`, [biz1.id]), /permission denied/, "reference");
+    await rejects(() => db.query(`update public.business_establishments set record_status = 'active' where id = $1`, [biz1.id]), /permission denied/, "status");
+    await rejects(() => db.query(`delete from public.business_establishments where id = $1`, [biz1.id]), /permission denied/, "delete");
+  });
+  eq((await q(`select owner_id from public.business_establishments where id = $1`, [biz1.id]))[0].owner_id, owner1);
+});
+
+await test("P3-15. staff roles cannot create business profiles; department staff cannot read them", async () => {
+  await rejects(() => createBusiness(bplo3), /row-level security/, "bplo insert");
+  await rejects(() => createBusiness(admin3), /row-level security/, "admin insert");
+  await as(deptStaff3, async () => eq(await count(`select 1 from public.business_establishments`), 0));
+});
+
+await test("P3-4. applicant can browse active permit types (all three are seeded)", async () => {
+  const rows = await as(owner1, () => q(`select application_code from public.permit_types order by sort_order`));
+  eq(rows.map((r) => r.application_code).join(","), "NEW,RENEWAL,AMENDMENT");
+  await as(null, () => rejects(() => db.query(`select * from public.permit_types`), /permission denied/));
+});
+
+let draft1;
+await test("P3-4. applicant can create a draft application for a business they own", async () => {
+  draft1 = await createDraft(owner1, biz1.id);
+  eq(draft1.applicant_id, owner1);
+  eq(draft1.application_status, "draft");
+  eq(draft1.reference_number, null, "drafts have no reference");
+  const hist = await as(owner1, () => q(`select previous_status, new_status from public.application_status_history where application_id = $1`, [draft1.id]));
+  eq(hist.length, 1, "history row for draft creation");
+  eq(hist[0].new_status, "draft");
+  eq(await auditCount("application.created", draft1.id), 1);
+});
+
+await test("P3-4/12. applicant cannot create an application for someone else's business", async () => {
+  await rejects(() => createDraft(owner1, biz2.id), /row-level security/);
+});
+
+await test("P3-11. applicant cannot create an application with a status, reference or other applicant", async () => {
+  await as(owner1, async () => {
+    await rejects(
+      () => db.query(`insert into public.permit_applications (business_id, permit_type_id, application_status) values ($1,$2,'submitted')`, [biz1.id, NEW_TYPE]),
+      /permission denied/,
+      "status",
+    );
+    await rejects(
+      () => db.query(`insert into public.permit_applications (business_id, permit_type_id, reference_number) values ($1,$2,'PTY-2026-123456')`, [biz1.id, NEW_TYPE]),
+      /permission denied/,
+      "reference",
+    );
+    await rejects(
+      () => db.query(`insert into public.permit_applications (business_id, permit_type_id, applicant_id) values ($1,$2,$3)`, [biz1.id, NEW_TYPE, owner2]),
+      /permission denied/,
+      "applicant_id",
+    );
+  });
+});
+
+await test("P3-5. applicant can edit their own draft", async () => {
+  const res = await as(owner1, () =>
+    db.query(`update public.permit_applications set applicant_remarks = 'First-time applicant', permit_type_id = $2 where id = $1`, [draft1.id, RENEWAL_TYPE]),
+  );
+  eq(res.affectedRows, 1);
+  await as(owner1, () => db.query(`update public.permit_applications set permit_type_id = $2 where id = $1`, [draft1.id, NEW_TYPE]));
+});
+
+await test("P3-5/12. a draft cannot be moved to another applicant's business", async () => {
+  await as(owner1, () =>
+    rejects(() => db.query(`update public.permit_applications set business_id = $2 where id = $1`, [draft1.id, biz2.id]), /row-level security/),
+  );
+});
+
+await test("P3-6. applicant cannot change status directly; must use the submit function", async () => {
+  await as(owner1, () =>
+    rejects(() => db.query(`update public.permit_applications set application_status = 'submitted' where id = $1`, [draft1.id]), /permission denied/),
+  );
+});
+
+await test("P3-6. submitting an incomplete draft is refused", async () => {
+  const incomplete = await createDraft(owner1, biz1.id, NEW_TYPE, { nature_of_business: null });
+  await rejects(() => submit(owner1, incomplete.id), /Complete the business name/);
+  eq((await q(`select application_status from public.permit_applications where id = $1`, [incomplete.id]))[0].application_status, "draft");
+});
+
+let ref1;
+await test("P3-6/7. applicant can submit; a server-generated PTY-YYYY-NNNNNN reference is assigned", async () => {
+  ref1 = await submit(owner1, draft1.id);
+  const year = new Date().toLocaleString("en-US", { timeZone: "Asia/Manila", year: "numeric" });
+  assert(new RegExp(`^PTY-${year}-\\d{6}$`).test(ref1), `reference ${ref1}`);
+  const [row] = await q(`select application_status, reference_number, submitted_at, submission_snapshot from public.permit_applications where id = $1`, [draft1.id]);
+  eq(row.application_status, "submitted");
+  eq(row.reference_number, ref1);
+  assert(row.submitted_at !== null, "submitted_at set");
+  eq(row.submission_snapshot.business.registered_business_name, "Sample Sari-Sari Store", "snapshot of business");
+  assert(!("owner_id" in row.submission_snapshot.business), "snapshot omits internal owner id");
+  eq(await auditCount("application.submitted", draft1.id), 1);
+  const hist = await q(`select previous_status, new_status, changed_by from public.application_status_history where application_id = $1 order by created_at`, [draft1.id]);
+  eq(hist.length, 2);
+  eq(hist[1].previous_status, "draft");
+  eq(hist[1].new_status, "submitted");
+  eq(hist[1].changed_by, owner1);
+});
+
+await test("P3-7. every submission gets a unique, sequential reference number", async () => {
+  const refs = [ref1];
+  for (let i = 0; i < 5; i += 1) {
+    const d = await createDraft(owner1, biz1.id);
+    refs.push(await submit(owner1, d.id));
+  }
+  const b = await createDraft(owner2, biz2.id);
+  refs.push(await submit(owner2, b.id));
+  eq(new Set(refs).size, refs.length, "no duplicates");
+  const nums = refs.map((r) => Number(r.split("-")[2]));
+  for (let i = 1; i < nums.length; i += 1) eq(nums[i], nums[i - 1] + 1, "sequential");
+});
+
+await test("P3-7. a duplicate reference number is rejected by the unique constraint", async () => {
+  const d = await createDraft(owner2, biz2.id);
+  await rejects(
+    () => db.query(`update public.permit_applications set application_status = 'submitted', reference_number = $2, submitted_at = now() where id = $1`, [d.id, ref1]),
+    /unique|duplicate/i,
+  );
+});
+
+await test("P3-8. applicant cannot modify or delete a submitted application", async () => {
+  await as(owner1, async () => {
+    const upd = await db.query(`update public.permit_applications set applicant_remarks = 'changed' where id = $1`, [draft1.id]);
+    eq(upd.affectedRows, 0, "update affects nothing (RLS only exposes drafts for update)");
+    await rejects(() => db.query(`update public.permit_applications set application_status = 'draft' where id = $1`, [draft1.id]), /permission denied/, "status column");
+    const del = await db.query(`delete from public.permit_applications where id = $1`, [draft1.id]);
+    eq(del.affectedRows, 0, "delete affects nothing");
+    await rejects(() => submit(owner1, draft1.id), /Only draft applications/, "re-submit");
+  });
+  eq((await q(`select applicant_remarks from public.permit_applications where id = $1`, [draft1.id]))[0].applicant_remarks, "First-time applicant");
+});
+
+await test("P3-11. applicants cannot call the internal reference generator or touch counters", async () => {
+  await as(owner1, async () => {
+    await rejects(() => db.query(`select public.next_reference_number('PTY', 2026)`), /permission denied/);
+    await rejects(() => db.query(`select * from public.reference_counters`), /permission denied/);
+    await rejects(() => db.query(`update public.reference_counters set last_value = 0`), /permission denied/);
+  });
+});
+
+await test("P3-9. applicant can read their own application history", async () => {
+  await as(owner1, async () => {
+    const rows = await q(`select new_status from public.application_status_history where application_id = $1 order by created_at`, [draft1.id]);
+    eq(rows.map((r) => r.new_status).join(","), "draft,submitted");
+    await rejects(() => db.query(`insert into public.application_status_history (application_id, new_status) values ($1, 'submitted')`, [draft1.id]), /permission denied/);
+    await rejects(() => db.query(`update public.application_status_history set remarks = 'x'`), /permission denied/);
+  });
+});
+
+await test("P3-10. applicant cannot see another applicant's applications or their history", async () => {
+  await as(owner2, async () => {
+    eq(await count(`select 1 from public.permit_applications where id = $1`, [draft1.id]), 0);
+    eq(await count(`select 1 from public.application_status_history where application_id = $1`, [draft1.id]), 0);
+    await rejects(() => db.query(`select public.cancel_permit_application($1, null)`, [draft1.id]), /Application not found/);
+    await rejects(() => submit(owner2, draft1.id), /Application not found/);
+  });
+});
+
+await test("P3-15. BPLO and administrators see submitted applications but not drafts; department staff see none", async () => {
+  const privateDraft = await createDraft(owner1, biz1.id);
+  await as(bplo3, async () => {
+    eq(await count(`select 1 from public.permit_applications where id = $1`, [draft1.id]), 1, "submitted visible");
+    eq(await count(`select 1 from public.permit_applications where id = $1`, [privateDraft.id]), 0, "draft hidden");
+    eq(await count(`select 1 from public.business_establishments where id = $1`, [biz1.id]), 1, "business visible");
+    const r = await db.query(`update public.permit_applications set applicant_remarks = 'x' where id = $1`, [draft1.id]);
+    eq(r.affectedRows, 0, "staff cannot edit directly");
+  });
+  await as(admin3, async () => eq(await count(`select 1 from public.permit_applications where id = $1`, [draft1.id]), 1));
+  await as(deptStaff3, async () => eq(await count(`select 1 from public.permit_applications`), 0));
+});
+
+await test("P3-12. applicant can cancel a submitted application; the record is preserved", async () => {
+  await as(owner1, () => db.query(`select public.cancel_permit_application($1, 'Business plans changed')`, [draft1.id]));
+  const [row] = await q(`select application_status, reference_number, cancelled_at, cancellation_reason, cancelled_by from public.permit_applications where id = $1`, [draft1.id]);
+  eq(row.application_status, "cancelled");
+  eq(row.reference_number, ref1, "reference kept");
+  assert(row.cancelled_at !== null, "cancelled_at recorded");
+  eq(row.cancellation_reason, "Business plans changed");
+  eq(row.cancelled_by, owner1);
+  const hist = await q(`select previous_status, new_status, remarks from public.application_status_history where application_id = $1 order by created_at`, [draft1.id]);
+  eq(hist.at(-1).new_status, "cancelled");
+  eq(hist.at(-1).remarks, "Business plans changed");
+  eq(await auditCount("application.cancelled", draft1.id), 1);
+  await as(owner1, () => rejects(() => db.query(`select public.cancel_permit_application($1, null)`, [draft1.id]), /can no longer be cancelled/));
+});
+
+await test("P3-12. cancelled and submitted applications cannot be deleted by anyone", async () => {
+  await rejects(() => db.query(`delete from public.permit_applications where id = $1`, [draft1.id]), /Only draft applications can be deleted/);
+  eq(await count(`select 1 from public.permit_applications where id = $1`, [draft1.id]), 1);
+});
+
+await test("P3-12. staff can cancel a submitted application only with a reason; drafts are off limits", async () => {
+  const d = await createDraft(owner2, biz2.id);
+  await as(bplo3, () => rejects(() => db.query(`select public.cancel_permit_application($1, null)`, [d.id]), /Application not found/, "draft hidden from staff"));
+  await submit(owner2, d.id);
+  await as(bplo3, () => rejects(() => db.query(`select public.cancel_permit_application($1, '  ')`, [d.id]), /Give a reason/));
+  await as(bplo3, () => db.query(`select public.cancel_permit_application($1, 'Duplicate submission')`, [d.id]));
+  eq((await q(`select cancelled_by from public.permit_applications where id = $1`, [d.id]))[0].cancelled_by, bplo3);
+  await as(deptStaff3, () => rejects(() => db.query(`select public.cancel_permit_application($1, 'x')`, [d.id]), /Application not found/));
+});
+
+await test("P3-4. applicant can delete their own draft (and its history), and it is audited", async () => {
+  const d = await createDraft(owner1, biz1.id);
+  const res = await as(owner1, () => db.query(`delete from public.permit_applications where id = $1`, [d.id]));
+  eq(res.affectedRows, 1);
+  eq(await count(`select 1 from public.application_status_history where application_id = $1`, [d.id]), 0);
+  eq(await auditCount("application.draft_deleted", d.id), 1);
+  const other = await createDraft(owner2, biz2.id);
+  const res2 = await as(owner1, () => db.query(`delete from public.permit_applications where id = $1`, [other.id]));
+  eq(res2.affectedRows, 0, "cannot delete another applicant's draft");
+});
+
+await test("P3-3. record status is managed only by BPLO/administrators and is audited", async () => {
+  await as(owner1, () => rejects(() => db.query(`select public.set_business_record_status($1,'active')`, [biz1.id]), /Only BPLO/));
+  await as(bplo3, () => db.query(`select public.set_business_record_status($1,'active')`, [biz1.id]));
+  eq((await q(`select record_status from public.business_establishments where id = $1`, [biz1.id]))[0].record_status, "active");
+  eq(await auditCount("business.status_changed", biz1.id), 1);
+  await as(admin3, () => rejects(() => db.query(`select public.set_business_record_status($1,'deleted')`, [biz1.id]), /Invalid record status/));
+});
+
+await test("P3-3. an inactive business cannot be edited or used for new applications", async () => {
+  await as(admin3, () => db.query(`select public.set_business_record_status($1,'inactive')`, [biz2.id]));
+  const res = await as(owner2, () => db.query(`update public.business_establishments set trade_name = 'x' where id = $1`, [biz2.id]));
+  eq(res.affectedRows, 0, "edit blocked");
+  await rejects(() => createDraft(owner2, biz2.id), /row-level security/, "new draft blocked");
+  await as(admin3, () => db.query(`select public.set_business_record_status($1,'active')`, [biz2.id]));
+});
+
+await test("P3-4. inactive permit types cannot be used; only administrators manage types", async () => {
+  await as(owner1, () => rejects(() => db.query(`insert into public.permit_types (name, application_code) values ('Fake','FAKE')`), /row-level security/));
+  const upd = await as(bplo3, () => db.query(`update public.permit_types set is_active = false where id = $1`, [RENEWAL_TYPE]));
+  eq(upd.affectedRows, 0, "bplo cannot change types");
+  await as(admin3, () => db.query(`update public.permit_types set is_active = false where id = $1`, [RENEWAL_TYPE]));
+  await rejects(() => createDraft(owner1, biz1.id, RENEWAL_TYPE), /row-level security/);
+  eq(await as(owner1, () => count(`select 1 from public.permit_types`)), 2, "inactive type hidden from applicants");
+  eq(await as(bplo3, () => count(`select 1 from public.permit_types`)), 3, "staff see all types");
+  eq(await auditCount("permit_type.deactivated", RENEWAL_TYPE), 1);
+  await as(admin3, () => db.query(`update public.permit_types set is_active = true where id = $1`, [RENEWAL_TYPE]));
+});
+
+await test("P3-13. dashboard counts come straight from the applicant's own rows", async () => {
+  const fresh = await makeUser("freshApplicant");
+  await as(fresh, async () => {
+    eq(await count(`select 1 from public.business_establishments`), 0, "empty state: no businesses");
+    eq(await count(`select 1 from public.permit_applications`), 0, "empty state: no applications");
+  });
+  const b = await createBusiness(fresh);
+  await createDraft(fresh, b.id);
+  const s = await createDraft(fresh, b.id);
+  await submit(fresh, s.id);
+  const [c] = await as(fresh, () =>
+    q(`select count(*)::int as total,
+              count(*) filter (where application_status = 'draft')::int as drafts,
+              count(*) filter (where application_status = 'submitted')::int as submitted
+         from public.permit_applications`),
+  );
+  eq(c.total, 2);
+  eq(c.drafts, 1);
+  eq(c.submitted, 1);
+});
+
+await test("P3-14. an applicant with business records cannot be silently deleted", async () => {
+  await rejects(() => db.query(`delete from auth.users where id = $1`, [owner1]), /foreign key|violates/i);
+});
+
+await test("P3-12. guard triggers still block protected columns if a future grant is too broad", async () => {
+  const b = await createBusiness(owner2, { registered_business_name: "Guard Test" });
+  const d = await createDraft(owner2, b.id);
+  await db.exec(`grant update on public.permit_applications to authenticated; grant update on public.business_establishments to authenticated;`);
+  try {
+    await as(owner2, async () => {
+      await rejects(() => db.query(`update public.permit_applications set application_status = 'submitted', reference_number = 'PTY-2026-777777', submitted_at = now() where id = $1`, [d.id]), /cannot be changed directly/);
+      await rejects(() => db.query(`update public.business_establishments set owner_id = $2 where id = $1`, [b.id, owner1]), /cannot be changed directly/);
+      await rejects(() => db.query(`update public.business_establishments set record_status = 'active' where id = $1`, [b.id]), /cannot be changed directly/);
+    });
+  } finally {
+    await db.exec(`revoke update on public.permit_applications from authenticated; revoke update on public.business_establishments from authenticated;
+      grant update (business_id, permit_type_id, business_name, business_address, nature_of_business, business_category, applicant_remarks) on public.permit_applications to authenticated;
+      grant update (registered_business_name, trade_name, business_description, business_type, ownership_type, business_category, business_email, business_contact_number, province, municipality, barangay, street_address, zip_code, owner_full_name, owner_email, owner_contact_number, nature_of_business, employee_count, estimated_capital, establishment_status, date_established) on public.business_establishments to authenticated;`);
+  }
+});
+
+await test("P3-15. suspended applicants cannot create businesses or applications", async () => {
+  const s = await makeUser("suspendedOwner");
+  const b = await createBusiness(s);
+  await db.query(`update public.profiles set account_status = 'suspended' where id = $1`, [s]);
+  await rejects(() => createBusiness(s), /row-level security/);
+  await rejects(() => createDraft(s, b.id), /row-level security/);
+});
+
+// ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
 let failed = 0;
