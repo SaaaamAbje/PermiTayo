@@ -22,6 +22,9 @@ export async function GET(request: NextRequest) {
   const type = OTP_TYPES.find((t) => t === typeParam);
   const next = safeInternalPath(searchParams.get("next"), "/dashboard");
 
+  // Supabase reports expired or already-used links with error parameters instead of a code.
+  if (searchParams.get("error") || searchParams.get("error_code")) return go("/login?error=link-invalid");
+
   const supabase = await createClient();
   let failed = false;
 
@@ -31,6 +34,11 @@ export async function GET(request: NextRequest) {
   } else if (code) {
     const { error } = await supabase.auth.exchangeCodeForSession(code);
     failed = Boolean(error);
+    // Default Supabase email template: Supabase has ALREADY confirmed the address before
+    // redirecting here with ?code=. Exchanging the code fails when the link is opened in a
+    // different browser or device (no PKCE verifier cookie), but the account is confirmed,
+    // so a sign-up confirmation should not be reported as an invalid link.
+    if (failed && next.startsWith("/login")) return go("/login?confirmed=1");
   } else {
     failed = true;
   }
