@@ -1,6 +1,8 @@
+import Image from "next/image";
 import type { ReactNode } from "react";
 import { Bot, ShieldCheck, UserCheck } from "lucide-react";
 import { Logo } from "@/components/layout/Logo";
+import municipalHallFront from "../../../public/municipal-hall.png";
 
 const points = [
   { icon: Bot, text: "AI assists with checking requirements and suggesting routing." },
@@ -20,13 +22,16 @@ export function AuthShell({
   return (
     <div className="grid min-h-screen lg:grid-cols-[minmax(0,6fr)_minmax(0,5fr)]">
       <aside className="relative order-2 hidden flex-col justify-between overflow-hidden bg-brand-900 p-12 text-white lg:flex">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src="/municipal-hall.png"
+        <Image
+          src={municipalHallFront}
           alt="Municipal Hall of Rosario, Batangas"
-          className="absolute inset-0 h-full w-full object-cover"
+          fill
+          priority
+          placeholder="blur"
+          sizes="(min-width: 1024px) 45vw, 0px"
+          className="object-cover object-[50%_35%]"
         />
-        <div className="absolute inset-0 bg-gradient-to-t from-brand-950/95 via-brand-900/70 to-brand-900/40" aria-hidden="true" />
+        <div className="absolute inset-0 bg-gradient-to-t from-brand-950/95 via-brand-900/60 to-brand-900/20" aria-hidden="true" />
         <Logo tone="light" className="relative" />
         <div className="relative max-w-md">
           <h2 className="text-3xl font-bold leading-tight tracking-tight">
