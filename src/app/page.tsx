@@ -7,7 +7,9 @@ import {
   MessageSquare,
   UserCheck,
 } from "lucide-react";
+import Image from "next/image";
 import { Logo } from "@/components/layout/Logo";
+import municipalHall from "../../public/images/rosario-municipal-hall.jpg";
 import { Button } from "@/components/ui/Button";
 import { ROLE_ORDER, ROLES } from "@/lib/roles";
 
@@ -49,8 +51,20 @@ export default function HomePage() {
       <main id="main-content" className="flex-1">
         {/* Hero */}
         <section className="relative overflow-hidden bg-brand-900 text-white">
-          <div className="pointer-events-none absolute -right-32 -top-32 h-[28rem] w-[28rem] rounded-full bg-brand-700/50" aria-hidden="true" />
-          <div className="pointer-events-none absolute -bottom-40 left-1/3 h-80 w-80 rounded-full bg-gold-400/10" aria-hidden="true" />
+          <Image
+            src={municipalHall}
+            alt=""
+            fill
+            priority
+            placeholder="blur"
+            sizes="100vw"
+            className="object-cover object-center"
+          />
+          {/* Dark brand overlay keeps the white text readable over the photo. */}
+          <div
+            className="pointer-events-none absolute inset-0 bg-gradient-to-r from-brand-950/90 via-brand-900/75 to-brand-900/40"
+            aria-hidden="true"
+          />
           <div className="relative mx-auto w-full max-w-6xl px-4 py-16 sm:px-6 sm:py-24">
             <p className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-xs font-medium text-brand-100">
               Municipality of Rosario, Batangas
