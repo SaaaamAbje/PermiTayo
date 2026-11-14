@@ -69,8 +69,9 @@ export const ROLES: Record<RoleId, RoleConfig> = {
     tagline: "Apply for and track your business permit",
     nav: [
       { label: "Overview", slug: "", icon: "layout-dashboard", description: "Your applications at a glance.", planned: [] },
-      { label: "My Applications", slug: "applications", icon: "file-text", description: "All of your new and renewal applications.", planned: ["Filter by status and year", "Open an application to see its full history", "Start a renewal from a prior permit"] },
-      { label: "New Application", slug: "new-application", icon: "file-plus", description: "Start a new or renewal business permit application.", planned: [] },
+      { label: "My Businesses", slug: "businesses", icon: "building", description: "Business profiles you use when applying.", planned: [] },
+      { label: "My Applications", slug: "applications", icon: "file-text", description: "All of your new, renewal and amendment applications.", planned: [] },
+      { label: "New Application", slug: "new-application", icon: "file-plus", description: "Start a new business permit application.", planned: [] },
       { label: "Documents", slug: "documents", icon: "folder-open", description: "Requirements you have uploaded and their verification status.", planned: ["Upload and replace documents", "See AI pre-check notes per document", "Download submitted copies"] },
       { label: "Status Tracker", slug: "tracking", icon: "map-pin", description: "Follow your application through each office.", planned: [] },
       { label: "Ask Permitayo", slug: "inquiries", icon: "message-square", description: "Ask questions about requirements, fees and next steps.", planned: [] },
@@ -85,6 +86,7 @@ export const ROLES: Record<RoleId, RoleConfig> = {
     nav: [
       { label: "Overview", slug: "", icon: "layout-dashboard", description: "Today's intake and processing workload.", planned: [] },
       { label: "Application Queue", slug: "queue", icon: "inbox", description: "Newly submitted and in-progress applications.", planned: [] },
+      { label: "Business Profiles", slug: "businesses", icon: "building", description: "Search business profiles registered by applicants.", planned: [] },
       { label: "Requirements Verification", slug: "verification", icon: "shield-check", description: "Verify submitted documents against the checklist.", planned: ["Side-by-side document viewer", "AI pre-check findings with confidence", "Request missing documents from the applicant"] },
       { label: "Departmental Routing", slug: "routing", icon: "git-branch", description: "Send applications to the offices that must review them.", planned: ["AI-suggested routing with rationale", "Manual override with reason", "Parallel and sequential routing views"] },
       { label: "Inquiries", slug: "inquiries", icon: "message-square", description: "Citizen questions that need a human response.", planned: [] },
@@ -130,6 +132,7 @@ export const ROLES: Record<RoleId, RoleConfig> = {
       { label: "Overview", slug: "", icon: "layout-dashboard", description: "System health and activity.", planned: [] },
       { label: "User Management", slug: "users", icon: "users", description: "Search accounts, change roles and status, and assign departments.", planned: [] },
       { label: "Roles & Access", slug: "access", icon: "key", description: "What each role can see and do.", planned: ["Permission matrix per role", "Department scoping", "Review of privileged accounts"] },
+      { label: "Business Profiles", slug: "businesses", icon: "folder-open", description: "Search business profiles registered by applicants.", planned: [] },
       { label: "Departments", slug: "departments", icon: "building", description: "Offices that participate in permit processing.", planned: [] },
       { label: "Requirement Templates", slug: "requirements", icon: "list-checks", description: "Requirement checklists by business type.", planned: ["Edit requirement lists by business type", "Version history", "Effective dates"] },
       { label: "AI Settings", slug: "ai-settings", icon: "sparkles", description: "Controls for AI assistance. No AI is connected yet.", planned: ["Enable or disable each AI assist", "Confidence thresholds for flagging", "Human review requirements"] },
@@ -139,6 +142,12 @@ export const ROLES: Record<RoleId, RoleConfig> = {
     ],
   },
 };
+
+/**
+ * Section slugs that have their own route folder under /dashboard/[role]/ and
+ * are therefore not served by the generic [section] page.
+ */
+export const DEDICATED_SECTIONS = new Set(["businesses", "applications", "new-application"]);
 
 export const ROLE_ORDER: RoleId[] = ["applicant", "bplo", "department", "department-head", "admin"];
 

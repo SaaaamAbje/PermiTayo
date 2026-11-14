@@ -1,4 +1,4 @@
--- Permitayo Phase 2: run this AFTER setup-all.sql. Every row's "result" should equal "expected".
+-- Permitayo: run this AFTER setup-all.sql (or after phase3-upgrade.sql). Every row's "result" should equal "expected".
 select 'tables created' as check, count(*)::text as result, '4' as expected
   from information_schema.tables
   where table_schema = 'public' and table_name in ('profiles', 'departments', 'department_members', 'audit_logs')
@@ -17,4 +17,28 @@ select 'administrator functions present', count(*)::text, '4'
   where n.nspname = 'public' and p.proname in ('admin_set_user_role', 'admin_set_account_status', 'admin_assign_department', 'admin_remove_department_assignment')
 union all
 select 'private documents bucket', count(*)::text, '1'
-  from storage.buckets where id = 'permit-documents' and public = false;
+  from storage.buckets where id = 'permit-documents' and public = false
+union all
+select 'phase 3 tables created', count(*)::text, '5'
+  from information_schema.tables
+  where table_schema = 'public'
+    and table_name in ('reference_counters', 'permit_types', 'business_establishments', 'permit_applications', 'application_status_history')
+union all
+select 'phase 3 tables with row level security on', count(*)::text, '5'
+  from pg_tables
+  where schemaname = 'public' and rowsecurity
+    and tablename in ('reference_counters', 'permit_types', 'business_establishments', 'permit_applications', 'application_status_history')
+union all
+select 'permit types seeded', count(*)::text, '3'
+  from public.permit_types where application_code in ('NEW', 'RENEWAL', 'AMENDMENT')
+union all
+select 'application functions present', count(*)::text, '4'
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname = 'public'
+    and p.proname in ('submit_permit_application', 'cancel_permit_application', 'set_business_record_status', 'next_reference_number')
+union all
+select 'application guard and history triggers present', count(*)::text, '5'
+  from pg_trigger
+  where not tgisinternal
+    and tgname in ('permit_applications_guard_insert', 'permit_applications_guard_update', 'permit_applications_guard_delete',
+                   'permit_applications_record_status', 'business_establishments_guard_protected_columns');
