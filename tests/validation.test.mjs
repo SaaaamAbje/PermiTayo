@@ -24,6 +24,15 @@ import {
   cancelApplicationSchema,
 } from "../src/lib/applications/schemas.ts";
 import { formatBusinessAddress } from "../src/lib/business/constants.ts";
+import {
+  finalizeUploadSchema,
+  prepareUploadSchema,
+  requirementCreateSchema,
+  requirementUpdateSchema,
+  reviewDocumentSchema,
+} from "../src/lib/documents/schemas.ts";
+import { detectDocumentType } from "../src/lib/documents/file-signature.ts";
+import { acceptAttribute, formatFileSize } from "../src/lib/documents/constants.ts";
 
 const results = [];
 function test(name, fn) {
@@ -269,6 +278,97 @@ test("business and application search reject PostgREST filter characters", () =>
     for (const bad of ["a,owner_id.eq.x", "x)", "(x", "100%", "a*b", "a;b", "a\\b"]) assert(!schema.safeParse(bad).success, `rejects ${bad}`);
     for (const ok of ["PTY-2026-000001", "BUS-2026", "Juan's Store", "A & B Trading", "Niño Bakery"]) assert(schema.safeParse(ok).success, `accepts ${ok}`);
   }
+});
+
+// ---- Phase 4: requirements and documents -------------------------------------
+const validRequirement = {
+  permitTypeId: ID,
+  name: "  Barangay clearance ",
+  description: "",
+  applicantInstructions: "Upload a clear scan.",
+  isRequired: "required",
+  acceptedFileTypes: ["application/pdf", "image/png", "application/pdf"],
+  maxFileSizeMb: "5",
+  displayOrder: "10",
+  isActive: "on",
+};
+
+test("requirement: valid input passes and is normalised", () => {
+  const r = requirementCreateSchema.safeParse(validRequirement);
+  assert(r.success, messages(r).join("; "));
+  assert(r.data.name === "Barangay clearance", "trimmed");
+  assert(r.data.description === null, "empty description becomes null");
+  assert(r.data.maxFileSizeMb === 5 * 1024 * 1024, "MB converted to bytes");
+  assert(r.data.acceptedFileTypes.length === 2, "duplicate formats removed");
+  assert(r.data.isActive === true && r.data.displayOrder === 10);
+  const off = requirementCreateSchema.safeParse({ ...validRequirement, isActive: undefined });
+  assert(off.success && off.data.isActive === false, "unchecked box means inactive");
+});
+
+test("requirement: formats, size and order limits", () => {
+  assert(!requirementCreateSchema.safeParse({ ...validRequirement, acceptedFileTypes: [] }).success, "at least one format");
+  for (const t of ["application/x-msdownload", "text/html", "image/gif", "application/zip"]) {
+    assert(!requirementCreateSchema.safeParse({ ...validRequirement, acceptedFileTypes: [t] }).success, `rejects ${t}`);
+  }
+  for (const mb of ["0", "0.05", "11", "abc", "-1", "5.55"]) {
+    assert(!requirementCreateSchema.safeParse({ ...validRequirement, maxFileSizeMb: mb }).success, `rejects ${mb} MB`);
+  }
+  assert(requirementCreateSchema.safeParse({ ...validRequirement, maxFileSizeMb: "0.5" }).success, "0.5 MB ok");
+  assert(requirementCreateSchema.safeParse({ ...validRequirement, maxFileSizeMb: "10" }).success, "10 MB ok");
+  assert(!requirementCreateSchema.safeParse({ ...validRequirement, displayOrder: "-1" }).success, "negative order");
+  assert(!requirementCreateSchema.safeParse({ ...validRequirement, name: "" }).success, "name required");
+  assert(!requirementCreateSchema.safeParse({ ...validRequirement, isRequired: "maybe" }).success, "required/optional only");
+  assert(requirementUpdateSchema.safeParse({ ...validRequirement, requirementId: ID }).success);
+  const r = requirementUpdateSchema.safeParse({ ...validRequirement, requirementId: ID, created_by: ID, permit_type_id: ID });
+  assert(r.success && !("created_by" in r.data) && !("permit_type_id" in r.data), "creator and type are not editable fields");
+});
+
+test("upload: only PDF, JPEG and PNG up to 10 MB can be prepared", () => {
+  const base = { applicationId: ID, requirementId: ID, fileName: "clearance.pdf", fileSize: 1000, mimeType: "application/pdf" };
+  assert(prepareUploadSchema.safeParse(base).success);
+  for (const mimeType of ["application/x-msdownload", "application/javascript", "text/html", "image/svg+xml", ""]) {
+    assert(!prepareUploadSchema.safeParse({ ...base, mimeType }).success, `rejects ${mimeType || "empty type"}`);
+  }
+  assert(!prepareUploadSchema.safeParse({ ...base, fileSize: 0 }).success, "empty file");
+  assert(!prepareUploadSchema.safeParse({ ...base, fileSize: 10 * 1024 * 1024 + 1 }).success, "over 10 MB");
+  assert(!prepareUploadSchema.safeParse({ ...base, applicationId: "x" }).success, "application id");
+});
+
+test("upload: finalize accepts only generated storage paths", () => {
+  const ok = `${ID}/${ID}/${ID}/${ID}.pdf`;
+  const base = { applicationId: ID, requirementId: ID, fileName: "a.pdf" };
+  assert(finalizeUploadSchema.safeParse({ ...base, path: ok }).success);
+  for (const bad of [`${ID}/${ID}/${ID}/clearance.pdf`, `${ID}/${ID}/${ID}/${ID}.exe`, `../${ID}/${ID}/${ID}.pdf`, `${ID}/${ID}/${ID}/${ID}.pdf/../x`, `${ID}/${ID}.pdf`]) {
+    assert(!finalizeUploadSchema.safeParse({ ...base, path: bad }).success, `rejects ${bad}`);
+  }
+});
+
+test("upload: real content is identified from the first bytes, not the name", () => {
+  const bytes = (...b) => new Uint8Array(b);
+  assert(detectDocumentType(new TextEncoder().encode("%PDF-1.7\n")) === "application/pdf", "pdf");
+  assert(detectDocumentType(bytes(0xff, 0xd8, 0xff, 0xe0, 0, 0x10)) === "image/jpeg", "jpeg");
+  assert(detectDocumentType(bytes(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0)) === "image/png", "png");
+  assert(detectDocumentType(bytes(0x4d, 0x5a, 0x90, 0x00)) === null, "Windows executable (MZ) renamed to .pdf");
+  assert(detectDocumentType(new TextEncoder().encode("<html><script>")) === null, "HTML");
+  assert(detectDocumentType(bytes(0x50, 0x4b, 0x03, 0x04)) === null, "ZIP / Office file");
+  assert(detectDocumentType(new TextEncoder().encode("%PD")) === null, "truncated");
+});
+
+test("review: decision must be valid; resubmission needs a comment", () => {
+  assert(reviewDocumentSchema.safeParse({ documentId: ID, status: "accepted", comment: "" }).success);
+  assert(reviewDocumentSchema.safeParse({ documentId: ID, status: "under_review", comment: "" }).success);
+  const m = messages(reviewDocumentSchema.safeParse({ documentId: ID, status: "needs_resubmission", comment: "  " }));
+  assert(m.some((x) => x.startsWith("comment:")), m.join("; "));
+  assert(reviewDocumentSchema.safeParse({ documentId: ID, status: "needs_resubmission", comment: "Blurry scan." }).success);
+  for (const status of ["uploaded", "approved", "not_uploaded", ""]) {
+    assert(!reviewDocumentSchema.safeParse({ documentId: ID, status, comment: "" }).success, `rejects ${status}`);
+  }
+  assert(!reviewDocumentSchema.safeParse({ documentId: ID, status: "accepted", comment: "x".repeat(1001) }).success, "comment length");
+});
+
+test("document helpers: accept attribute and file sizes", () => {
+  assert(acceptAttribute(["application/pdf", "image/jpeg"]) === "application/pdf,image/jpeg,.pdf,.jpg,.jpeg");
+  assert(formatFileSize(5 * 1024 * 1024) === "5 MB" && formatFileSize(1536 * 1024) === "1.5 MB" && formatFileSize(2048) === "2 KB");
 });
 
 let failed = 0;

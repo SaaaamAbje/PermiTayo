@@ -15,6 +15,7 @@ import { Pagination, parsePage } from "@/components/ui/Pagination";
 import { BusinessDetailsCards, first, type SearchParams } from "@/components/business/BusinessViews";
 import { ApplicationStatusBadge, RecordStatusBadge } from "./StatusBadges";
 import { CancelApplicationButton, DeleteDraftButton } from "./ApplicationActions";
+import { RequirementsSummaryCard } from "@/components/documents/DocumentViews";
 
 const BASE = "/dashboard/applicant/applications";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -215,6 +216,8 @@ export async function ApplicationDetailView({ id, saved }: { id: string; saved?:
           </div>
         ) : null}
       </Card>
+
+      <RequirementsSummaryCard applicationId={app.id} />
 
       <Card>
         <CardHeader title="Application information" description={snapshot ? "As submitted." : "Current draft. You can change this until you submit."} />

@@ -1,5 +1,5 @@
 /**
- * Hand-written types for the Phase 2 and Phase 3 schema (supabase/migrations).
+ * Hand-written types for the Phase 2, 3 and 4 schema (supabase/migrations).
  * Replace with generated types (`supabase gen types typescript`) once a
  * project is linked; the shape below matches that output.
  */
@@ -17,6 +17,20 @@ export type OwnershipType = "sole_proprietorship" | "partnership" | "corporation
 export type EstablishmentStatus = "not_yet_operating" | "operating" | "temporarily_closed" | "permanently_closed";
 export type BusinessRecordStatus = "pending_verification" | "active" | "inactive";
 export type DbApplicationStatus = "draft" | "submitted" | "cancelled";
+export type DocumentStatus = "uploaded" | "under_review" | "accepted" | "needs_resubmission";
+export type DocumentMimeType = "application/pdf" | "image/jpeg" | "image/png";
+
+/** Columns BPLO personnel and administrators may write on permit_requirements. */
+export type RequirementWritable = {
+  name: string;
+  description: string | null;
+  applicant_instructions: string | null;
+  is_required: boolean;
+  accepted_file_types: DocumentMimeType[];
+  max_file_size: number;
+  display_order: number;
+  is_active: boolean;
+};
 
 /** Columns an applicant may write on business_establishments (enforced by column grants). */
 export type BusinessWritable = {
@@ -280,6 +294,88 @@ export type Database = {
           },
         ];
       };
+      permit_requirements: {
+        Row: RequirementWritable & {
+          id: string;
+          permit_type_id: string;
+          conditions: Record<string, unknown>;
+          created_by: string | null;
+          updated_by: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: Partial<RequirementWritable> & { permit_type_id: string; name: string };
+        Update: Partial<RequirementWritable>;
+        Relationships: [
+          {
+            foreignKeyName: "permit_requirements_permit_type_id_fkey";
+            columns: ["permit_type_id"];
+            isOneToOne: false;
+            referencedRelation: "permit_types";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      application_documents: {
+        Row: {
+          id: string;
+          application_id: string;
+          requirement_id: string;
+          applicant_id: string;
+          original_filename: string;
+          storage_path: string;
+          mime_type: DocumentMimeType;
+          file_size: number;
+          submission_version: number;
+          is_current: boolean;
+          document_status: DocumentStatus;
+          review_comment: string | null;
+          last_reviewed_by: string | null;
+          last_reviewed_at: string | null;
+          uploaded_at: string;
+          updated_at: string;
+        };
+        Insert: never;
+        Update: never;
+        Relationships: [
+          {
+            foreignKeyName: "application_documents_application_id_fkey";
+            columns: ["application_id"];
+            isOneToOne: false;
+            referencedRelation: "permit_applications";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "application_documents_requirement_id_fkey";
+            columns: ["requirement_id"];
+            isOneToOne: false;
+            referencedRelation: "permit_requirements";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      document_review_history: {
+        Row: {
+          id: string;
+          application_document_id: string;
+          reviewed_by: string | null;
+          previous_status: DocumentStatus;
+          new_status: Exclude<DocumentStatus, "uploaded">;
+          review_comment: string | null;
+          created_at: string;
+        };
+        Insert: never;
+        Update: never;
+        Relationships: [
+          {
+            foreignKeyName: "document_review_history_application_document_id_fkey";
+            columns: ["application_document_id"];
+            isOneToOne: false;
+            referencedRelation: "application_documents";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
     };
     Views: { [_ in never]: never };
     Functions: {
@@ -294,6 +390,12 @@ export type Database = {
       submit_permit_application: { Args: { p_application: string }; Returns: string };
       cancel_permit_application: { Args: { p_application: string; p_reason?: string | null }; Returns: undefined };
       set_business_record_status: { Args: { p_business: string; p_status: string }; Returns: undefined };
+      register_application_document: {
+        Args: { p_application: string; p_requirement: string; p_storage_path: string; p_original_filename: string };
+        Returns: string;
+      };
+      review_application_document: { Args: { p_document: string; p_status: string; p_comment?: string | null }; Returns: undefined };
+      document_upload_allowed: { Args: { p_application: string; p_requirement: string }; Returns: boolean };
     };
     Enums: { [_ in never]: never };
     CompositeTypes: { [_ in never]: never };

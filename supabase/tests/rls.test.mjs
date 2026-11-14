@@ -49,7 +49,11 @@ await db.exec(`
   create table storage.objects (
     id uuid primary key default gen_random_uuid(),
     bucket_id text references storage.buckets (id),
-    name text not null
+    name text not null,
+    owner uuid,
+    -- Supabase Storage fills this from the uploaded file (size in bytes, mimetype).
+    metadata jsonb,
+    unique (bucket_id, name)
   );
   alter table storage.objects enable row level security;
   create function storage.foldername(name text) returns text[] language sql immutable as $$
@@ -482,19 +486,25 @@ await test("15/16. nobody can edit or delete audit logs, including administrator
 // ---------------------------------------------------------------------------
 // F. Storage bucket policies (future uploads)
 // ---------------------------------------------------------------------------
-await test("storage: bucket is private; applicants can use only their own folder", async () => {
+await test("storage: bucket is private; applicants read only their own folder; free-form uploads are refused (Phase 4)", async () => {
   const [b] = await q(`select public from storage.buckets where id = 'permit-documents'`);
   eq(b.public, false);
   const owner = await makeUser("uploader");
   const other = await makeUser("uploader2");
+  await db.query(`insert into storage.objects (bucket_id, name) values ('permit-documents', $1)`, [`${owner}/existing.pdf`]);
   await as(owner, async () => {
-    await db.query(`insert into storage.objects (bucket_id, name) values ('permit-documents', '${owner}/dti.pdf')`);
+    // Phase 4 replaced the Phase 2 "any file in your folder" rule: uploads must target an allowed application requirement.
+    await rejects(
+      () => db.query(`insert into storage.objects (bucket_id, name) values ('permit-documents', '${owner}/dti.pdf')`),
+      /row-level security/,
+      "arbitrary path in own folder",
+    );
     await rejects(
       () => db.query(`insert into storage.objects (bucket_id, name) values ('permit-documents', '${other}/dti.pdf')`),
       /row-level security/,
       "other user's folder",
     );
-    eq(await count(`select 1 from storage.objects`), 1);
+    eq(await count(`select 1 from storage.objects`), 1, "reads own folder");
   });
   await as(other, async () => eq(await count(`select 1 from storage.objects`), 0, "cannot read another applicant's files"));
   await as(bplo, () =>
@@ -926,6 +936,297 @@ await test("P3-15. suspended applicants cannot create businesses or applications
   await db.query(`update public.profiles set account_status = 'suspended' where id = $1`, [s]);
   await rejects(() => createBusiness(s), /row-level security/);
   await rejects(() => createDraft(s, b.id), /row-level security/);
+});
+
+// ---------------------------------------------------------------------------
+// H. Phase 4: requirements and document management
+// ---------------------------------------------------------------------------
+const bplo4 = await makeUser("bplo4", { role: "bplo_personnel" });
+const admin4 = await makeUser("admin4", { role: "administrator" });
+const dept4 = await makeUser("dept4", { role: "department_personnel" });
+const appl4a = await makeUser("appl4a");
+const appl4b = await makeUser("appl4b");
+const MB = 1024 * 1024;
+
+async function createRequirement(userId, typeId, overrides = {}) {
+  const f = { permit_type_id: typeId, name: `Req ${randomUUID().slice(0, 8)}`, is_required: true, ...overrides };
+  const cols = Object.keys(f);
+  const rows = await as(userId, () =>
+    q(
+      `insert into public.permit_requirements (${cols.join(", ")}) values (${cols.map((c, i) => (c === "accepted_file_types" ? `$${i + 1}::text[]` : `$${i + 1}`)).join(", ")})
+       returning id, created_by, max_file_size, accepted_file_types, is_active`,
+      Object.values(f),
+    ),
+  );
+  return rows[0];
+}
+
+const objPath = (applicant, app, req, ext = "pdf") => `${applicant}/${app}/${req}/${randomUUID()}.${ext}`;
+
+/** Simulates Supabase Storage: the object is inserted as the user (RLS applies) with the metadata Storage records. */
+async function putObject(userId, path, { size = 1000, mime = "application/pdf" } = {}) {
+  await as(userId, () =>
+    db.query(`insert into storage.objects (bucket_id, name, owner, metadata) values ('permit-documents', $1, $2, $3::jsonb)`, [
+      path,
+      userId,
+      JSON.stringify({ size, mimetype: mime }),
+    ]),
+  );
+}
+
+const register = (userId, app, req, path, name = "scan.pdf") =>
+  as(userId, async () => (await q(`select public.register_application_document($1,$2,$3,$4) as id`, [app, req, path, name]))[0].id);
+
+async function uploadDoc(userId, app, req, opts = {}) {
+  const ext = opts.ext ?? "pdf";
+  const path = objPath(userId, app, req, ext);
+  await putObject(userId, path, opts);
+  return { id: await register(userId, app, req, path, opts.name), path };
+}
+
+const review = (userId, docId, status, comment = null) =>
+  as(userId, () => db.query(`select public.review_application_document($1,$2,$3)`, [docId, status, comment]));
+
+const docRow = async (id) => (await q(`select * from public.application_documents where id = $1`, [id]))[0];
+
+let reqNewA; // NEW type, required, active
+let reqNewPdfOnly; // NEW type, PDF only, 1 MB
+let reqRenewal; // RENEWAL type
+let bizA;
+let draftA;
+
+await test("P4-seed. sample requirements are seeded inactive and clearly labelled", async () => {
+  const rows = await q(`select name, is_active, created_by from public.permit_requirements`);
+  eq(rows.length, 6, "six samples");
+  assert(rows.every((r) => !r.is_active), "all inactive");
+  assert(rows.every((r) => r.name.startsWith("Sample:")), "labelled Sample:");
+});
+
+await test("P4-1. BPLO personnel can create requirements; creator is recorded by the server and audited", async () => {
+  reqNewA = await createRequirement(bplo4, NEW_TYPE, { name: "Barangay clearance (test)", display_order: 10 });
+  eq(reqNewA.created_by, bplo4, "created_by set from the session");
+  eq(reqNewA.max_file_size, 5 * MB, "default 5 MB");
+  eq(reqNewA.accepted_file_types.join(","), "application/pdf,image/jpeg,image/png", "default formats");
+  eq(await auditCount("requirement.created", reqNewA.id), 1);
+  reqNewPdfOnly = await createRequirement(admin4, NEW_TYPE, { name: "PDF only (test)", accepted_file_types: "{application/pdf}", max_file_size: MB, is_required: false });
+  reqRenewal = await createRequirement(bplo4, RENEWAL_TYPE, { name: "Renewal only (test)" });
+});
+
+await test("P4-1. applicants and department staff cannot create requirements; nobody can spoof the creator", async () => {
+  await rejects(() => createRequirement(appl4a, NEW_TYPE), /row-level security/, "applicant");
+  await rejects(() => createRequirement(dept4, NEW_TYPE), /row-level security/, "department staff");
+  await rejects(() => createRequirement(bplo4, NEW_TYPE, { created_by: admin4 }), /permission denied/, "created_by column");
+});
+
+await test("P4-1. requirement updates and activation changes are audited; permit type cannot be moved", async () => {
+  const r = await createRequirement(bplo4, NEW_TYPE, { name: "Temporary (test)" });
+  await as(bplo4, () => db.query(`update public.permit_requirements set applicant_instructions = 'Use a clear scan.' where id = $1`, [r.id]));
+  await as(bplo4, () => db.query(`update public.permit_requirements set is_active = false where id = $1`, [r.id]));
+  await as(admin4, () => db.query(`update public.permit_requirements set is_active = true where id = $1`, [r.id]));
+  eq(await auditCount("requirement.updated", r.id), 1);
+  eq(await auditCount("requirement.deactivated", r.id), 1);
+  eq(await auditCount("requirement.activated", r.id), 1);
+  eq((await q(`select updated_by from public.permit_requirements where id = $1`, [r.id]))[0].updated_by, admin4);
+  await as(bplo4, () => rejects(() => db.query(`update public.permit_requirements set permit_type_id = $2 where id = $1`, [r.id, RENEWAL_TYPE]), /permission denied/));
+  const res = await as(appl4a, () => db.query(`update public.permit_requirements set is_active = false where id = $1`, [r.id]));
+  eq(res.affectedRows, 0, "applicant cannot change requirements");
+  await as(bplo4, () => db.query(`update public.permit_requirements set is_active = false where id = $1`, [r.id]));
+});
+
+await test("P4-1. invalid requirement settings are rejected", async () => {
+  await rejects(() => createRequirement(bplo4, NEW_TYPE, { accepted_file_types: "{application/x-msdownload}" }), /permit_requirements_file_types_valid/);
+  await rejects(() => createRequirement(bplo4, NEW_TYPE, { accepted_file_types: "{}" }), /permit_requirements_file_types_valid/);
+  await rejects(() => createRequirement(bplo4, NEW_TYPE, { max_file_size: 20 * MB }), /permit_requirements_max_size_range/);
+  await rejects(() => createRequirement(bplo4, NEW_TYPE, { name: "Barangay clearance (TEST)" }), /unique|duplicate/i, "duplicate name per type");
+});
+
+await test("P4-2/3. different permit types have different requirements; applicants see only those of their applications", async () => {
+  bizA = await createBusiness(appl4a, { registered_business_name: "Phase Four Store" });
+  draftA = await createDraft(appl4a, bizA.id, NEW_TYPE);
+  const seen = (await as(appl4a, () => q(`select id from public.permit_requirements`))).map((r) => r.id);
+  assert(seen.includes(reqNewA.id) && seen.includes(reqNewPdfOnly.id), "sees active NEW requirements");
+  assert(!seen.includes(reqRenewal.id), "does not see RENEWAL requirements");
+  eq((await as(appl4a, () => q(`select 1 from public.permit_requirements where not is_active`))).length, 0, "inactive hidden");
+  eq((await as(appl4b, () => q(`select 1 from public.permit_requirements`))).length, 0, "applicant without applications sees none");
+  eq((await as(bplo4, () => q(`select 1 from public.permit_requirements where permit_type_id = $1`, [RENEWAL_TYPE]))).length >= 1, true, "staff see all");
+});
+
+let docA1;
+await test("P4-4. applicant can upload a supported document to their own draft; it starts as Uploaded and is audited", async () => {
+  docA1 = await uploadDoc(appl4a, draftA.id, reqNewA.id, { size: 200000, mime: "application/pdf", name: "../../etc/clearance.pdf" });
+  const d = await docRow(docA1.id);
+  eq(d.document_status, "uploaded", "never auto-accepted");
+  eq(d.submission_version, 1);
+  eq(d.is_current, true);
+  eq(d.applicant_id, appl4a);
+  eq(d.file_size, 200000, "size taken from storage metadata");
+  assert(!d.original_filename.includes("/"), "path separators stripped from the display name");
+  eq(await auditCount("document.uploaded", docA1.id), 1);
+  const [log] = await q(`select description from public.audit_logs where entity_id = $1`, [docA1.id]);
+  assert(!/clearance\.pdf|etc/.test(log.description), "audit text has no filename");
+});
+
+await test("P4-5. unsupported formats are rejected (storage path and registration)", async () => {
+  await rejects(() => putObject(appl4a, objPath(appl4a, draftA.id, reqNewA.id, "exe")), /row-level security/, ".exe path");
+  await rejects(() => putObject(appl4a, `${appl4a}/${draftA.id}/${reqNewA.id}/report.pdf`), /row-level security/, "non-generated file name");
+  const p1 = objPath(appl4a, draftA.id, reqNewA.id, "pdf");
+  await putObject(appl4a, p1, { mime: "text/html" });
+  await rejects(() => register(appl4a, draftA.id, reqNewA.id, p1), /not accepted/, "content type mismatch");
+  const p2 = objPath(appl4a, draftA.id, reqNewPdfOnly.id, "png");
+  await putObject(appl4a, p2, { mime: "image/png" });
+  await rejects(() => register(appl4a, draftA.id, reqNewPdfOnly.id, p2), /not accepted/, "PNG on a PDF-only requirement");
+  const p3 = objPath(appl4a, draftA.id, reqNewA.id, "png");
+  await putObject(appl4a, p3, { mime: "application/pdf" });
+  await rejects(() => register(appl4a, draftA.id, reqNewA.id, p3), /not accepted/, "extension and type disagree");
+  eq(await count(`select 1 from public.application_documents where application_id = $1`, [draftA.id]), 1, "no records for rejected files");
+});
+
+await test("P4-6. files over the requirement's size limit are rejected", async () => {
+  const p = objPath(appl4a, draftA.id, reqNewPdfOnly.id, "pdf");
+  await putObject(appl4a, p, { size: MB + 1 });
+  await rejects(() => register(appl4a, draftA.id, reqNewPdfOnly.id, p), /larger than the 1(\.0)? MB limit/);
+  const p2 = objPath(appl4a, draftA.id, reqNewPdfOnly.id, "pdf");
+  await putObject(appl4a, p2, { size: 0 });
+  await rejects(() => register(appl4a, draftA.id, reqNewPdfOnly.id, p2), /empty/);
+});
+
+await test("P4-18. applicants can delete their own failed (unregistered) uploads but never registered files", async () => {
+  const p = objPath(appl4a, draftA.id, reqNewA.id, "pdf");
+  await putObject(appl4a, p);
+  const del = await as(appl4a, () => db.query(`delete from storage.objects where name = $1`, [p]));
+  eq(del.affectedRows, 1, "orphan removed");
+  const del2 = await as(appl4a, () => db.query(`delete from storage.objects where name = $1`, [docA1.path]));
+  eq(del2.affectedRows, 0, "registered file kept");
+  const upd = await as(appl4a, () => db.query(`update storage.objects set metadata = '{}'::jsonb where name = $1`, [docA1.path]).then((r) => r.affectedRows, () => 0));
+  eq(upd, 0, "objects cannot be overwritten in place");
+});
+
+await test("P4-7. another applicant cannot upload to, register for, or read someone else's application", async () => {
+  await rejects(() => putObject(appl4b, objPath(appl4b, draftA.id, reqNewA.id)), /row-level security/, "own folder but someone else's application");
+  await rejects(() => putObject(appl4b, objPath(appl4a, draftA.id, reqNewA.id)), /row-level security/, "someone else's folder");
+  await rejects(() => register(appl4b, draftA.id, reqNewA.id, docA1.path), /Application not found/, "register");
+  await as(appl4b, async () => {
+    eq(await count(`select 1 from public.application_documents`), 0, "document rows");
+    eq(await count(`select 1 from storage.objects where name = $1`, [docA1.path]), 0, "file");
+  });
+  await as(null, () => rejects(() => db.query(`select * from public.application_documents`), /permission denied/));
+});
+
+await test("P4-8. applicants cannot change document statuses or write review history", async () => {
+  await as(appl4a, async () => {
+    await rejects(() => db.query(`update public.application_documents set document_status = 'accepted' where id = $1`, [docA1.id]), /permission denied/);
+    await rejects(() => db.query(`insert into public.application_documents (application_id, requirement_id, applicant_id, original_filename, storage_path, mime_type, file_size, submission_version) values ($1,$2,$3,'x.pdf','x','application/pdf',1,9)`, [draftA.id, reqNewA.id, appl4a]), /permission denied/);
+    await rejects(() => db.query(`select public.review_application_document($1,'accepted',null)`, [docA1.id]), /Only BPLO personnel/);
+    await rejects(() => db.query(`insert into public.document_review_history (application_document_id, previous_status, new_status) values ($1,'uploaded','accepted')`, [docA1.id]), /permission denied/);
+  });
+  eq((await docRow(docA1.id)).document_status, "uploaded");
+});
+
+let docA2;
+await test("P4-12. replacing a draft document keeps the previous version", async () => {
+  docA2 = await uploadDoc(appl4a, draftA.id, reqNewA.id);
+  const [v1, v2] = [await docRow(docA1.id), await docRow(docA2.id)];
+  eq(v1.is_current, false, "old version kept, not current");
+  eq(v2.is_current, true);
+  eq(v2.submission_version, 2);
+  eq(await auditCount("document.replaced", docA2.id), 1);
+  eq(await as(appl4a, () => count(`select 1 from public.application_documents where requirement_id = $1`, [reqNewA.id])), 2, "both versions visible to the owner");
+});
+
+await test("P4-9. BPLO personnel cannot see or review documents of draft applications", async () => {
+  await as(bplo4, async () => {
+    eq(await count(`select 1 from public.application_documents where id = $1`, [docA2.id]), 0, "draft documents hidden");
+    eq(await count(`select 1 from storage.objects where name = $1`, [docA2.path]), 0, "draft files hidden");
+  });
+  await rejects(() => review(bplo4, docA2.id, "accepted"), /Only documents of submitted applications/);
+});
+
+await test("P4-13. after submission, uploaded documents are locked; missing requirements can still be uploaded", async () => {
+  await submit(appl4a, draftA.id);
+  await rejects(() => putObject(appl4a, objPath(appl4a, draftA.id, reqNewA.id)), /row-level security/, "replace an uploaded document after submission");
+  const late = await uploadDoc(appl4a, draftA.id, reqNewPdfOnly.id, { size: 1000 });
+  eq((await docRow(late.id)).document_status, "uploaded", "missing optional requirement uploaded after submission");
+});
+
+await test("P4-9. BPLO personnel review submitted documents; every action records reviewer, time and history", async () => {
+  await review(bplo4, docA2.id, "under_review");
+  await rejects(() => review(bplo4, docA2.id, "needs_resubmission", "   "), /Explain what the applicant needs to fix/);
+  await review(bplo4, docA2.id, "needs_resubmission", "The scan is cut off. Upload the whole page.");
+  const d = await docRow(docA2.id);
+  eq(d.document_status, "needs_resubmission");
+  eq(d.last_reviewed_by, bplo4);
+  assert(d.last_reviewed_at !== null, "timestamp");
+  const hist = await q(`select previous_status, new_status, reviewed_by, review_comment from public.document_review_history where application_document_id = $1 order by created_at`, [docA2.id]);
+  eq(hist.map((h) => `${h.previous_status}>${h.new_status}`).join(","), "uploaded>under_review,under_review>needs_resubmission");
+  assert(hist.every((h) => h.reviewed_by === bplo4), "reviewer recorded");
+  eq(await auditCount("document.resubmission_requested", docA2.id), 1);
+  eq(await auditCount("document.review_started", docA2.id), 1);
+  await as(bplo4, async () => eq(await count(`select 1 from storage.objects where name = $1`, [docA2.path]), 1, "BPLO can read the submitted file"));
+});
+
+await test("P4-9. administrators, department staff and applicants cannot review documents", async () => {
+  await rejects(() => review(admin4, docA2.id, "accepted"), /Only BPLO personnel/);
+  await rejects(() => review(dept4, docA2.id, "accepted"), /Only BPLO personnel/);
+  await as(dept4, async () => eq(await count(`select 1 from public.application_documents`), 0, "department staff see no documents"));
+  await rejects(() => review(bplo4, docA1.id, "accepted"), /older version/, "superseded versions cannot be reviewed");
+  await rejects(() => review(bplo4, docA2.id, "approved"), /Invalid review status/);
+});
+
+await test("P4-10. the applicant sees the reviewer's comment and the review history", async () => {
+  await as(appl4a, async () => {
+    const [d] = await q(`select document_status, review_comment from public.application_documents where id = $1`, [docA2.id]);
+    eq(d.document_status, "needs_resubmission");
+    eq(d.review_comment, "The scan is cut off. Upload the whole page.");
+    eq(await count(`select 1 from public.document_review_history where application_document_id = $1`, [docA2.id]), 2);
+  });
+  await as(appl4b, async () => eq(await count(`select 1 from public.document_review_history`), 0, "other applicants see none"));
+});
+
+let docA3;
+await test("P4-11/12. the applicant can replace a document needing resubmission; history and old versions remain", async () => {
+  docA3 = await uploadDoc(appl4a, draftA.id, reqNewA.id);
+  const d3 = await docRow(docA3.id);
+  eq(d3.document_status, "uploaded", "replacement goes back to Uploaded");
+  eq(d3.submission_version, 3);
+  const d2 = await docRow(docA2.id);
+  eq(d2.is_current, false);
+  eq(d2.document_status, "needs_resubmission", "old version keeps its review outcome");
+  eq(await count(`select 1 from public.document_review_history where application_document_id = $1`, [docA2.id]), 2, "history kept");
+  await rejects(() => putObject(appl4a, objPath(appl4a, draftA.id, reqNewA.id)), /row-level security/, "cannot replace again until reviewed");
+  await review(bplo4, docA3.id, "accepted", "Readable and complete.");
+  eq((await docRow(docA3.id)).document_status, "accepted");
+  eq(await auditCount("document.accepted", docA3.id), 1);
+});
+
+await test("P4-13. private files cannot be read without authorization", async () => {
+  await as(null, () => rejects(() => db.query(`select * from storage.objects`), /permission denied/, "anonymous"));
+  await as(appl4b, async () => eq(await count(`select 1 from storage.objects where name like $1`, [`${appl4a}/%`]), 0, "other applicant"));
+  await as(dept4, async () => eq(await count(`select 1 from storage.objects where bucket_id = 'permit-documents'`), 0, "department staff"));
+  await as(admin4, async () => eq(await count(`select 1 from storage.objects where name = $1`, [docA3.path]), 0, "administrators do not read applicant files"));
+});
+
+await test("P4-13. cancelled applications and inactive requirements accept no uploads", async () => {
+  const d = await createDraft(appl4a, bizA.id, NEW_TYPE);
+  await as(appl4a, () => db.query(`select public.cancel_permit_application($1, null)`, [d.id]));
+  await rejects(() => putObject(appl4a, objPath(appl4a, d.id, reqNewA.id)), /row-level security/, "cancelled");
+  const d2 = await createDraft(appl4a, bizA.id, NEW_TYPE);
+  const inactive = await createRequirement(bplo4, NEW_TYPE, { name: "Inactive (test)", is_active: false });
+  await rejects(() => putObject(appl4a, objPath(appl4a, d2.id, inactive.id)), /row-level security/, "inactive requirement");
+  await rejects(() => putObject(appl4a, objPath(appl4a, d2.id, reqRenewal.id)), /row-level security/, "requirement of another permit type");
+});
+
+await test("P4-12. review history is append-only and documents cannot be deleted", async () => {
+  await rejects(() => db.query(`delete from public.document_review_history where application_document_id = $1`, [docA2.id]), /cannot be changed/);
+  await as(appl4a, () => rejects(() => db.query(`delete from public.application_documents where id = $1`, [docA3.id]), /permission denied/));
+  await rejects(() => db.query(`delete from public.permit_applications where id = $1`, [draftA.id]), /Only draft applications/);
+});
+
+await test("P4-14. a deactivated requirement keeps its uploaded documents visible to the applicant", async () => {
+  await as(bplo4, () => db.query(`update public.permit_requirements set is_active = false where id = $1`, [reqNewPdfOnly.id]));
+  await as(appl4a, async () => {
+    eq(await count(`select 1 from public.permit_requirements where id = $1`, [reqNewPdfOnly.id]), 1, "still visible through the uploaded document");
+    eq(await count(`select 1 from public.application_documents where requirement_id = $1`, [reqNewPdfOnly.id]), 1);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-# Permitayo setup guide (Phases 2 and 3: database, authentication, business profiles and applications)
+# Permitayo setup guide (Phases 2 to 4: database, authentication, applications, requirements and documents)
 
 Permitayo needs a Supabase project for its database and sign-in. Until the
 environment variables below are set, the app runs but sign-in and registration are
@@ -20,22 +20,33 @@ The SQL lives in `supabase/migrations/` and must be applied **in filename order*
 
 1. `20261103000001_core_schema.sql` — tables: `profiles`, `departments`, `department_members`, `audit_logs`
 2. `20261103000002_security_rls_and_functions.sql` — grants, Row Level Security, signup trigger, administrator functions
-3. `20261103000003_storage_bucket.sql` — private `permit-documents` bucket for future uploads
+3. `20261103000003_storage_bucket.sql` — private `permit-documents` bucket (used for application documents from Phase 4)
 4. `20261103000004_seed_departments.sql` — six **proposed**, inactive departments
 5. `20261111000001_business_and_application_schema.sql` — Phase 3 tables: `permit_types`, `business_establishments`,
    `permit_applications`, `application_status_history`, and the internal `reference_counters`
 6. `20261111000002_business_and_application_security.sql` — Phase 3 grants, Row Level Security, guard and history
    triggers, and the `submit_permit_application`, `cancel_permit_application` and `set_business_record_status` functions
 7. `20261111000003_seed_permit_types.sql` — the three initial, configurable application types
+8. `20261114000001_requirements_and_documents_schema.sql` — Phase 4 tables: `permit_requirements`,
+   `application_documents`, `document_review_history`
+9. `20261114000002_requirements_and_documents_security.sql` — Phase 4 grants, Row Level Security, the
+   `register_application_document` and `review_application_document` functions, and stricter Storage policies
+   (replaces the Phase 2 "Applicants upload to own folder" policy)
+10. `20261114000003_seed_sample_requirements.sql` — six **sample, inactive** requirements (placeholders, not official)
 
-**Fastest way:** paste `supabase/setup-all.sql` (all seven files in order) into the SQL editor of a **new, empty** project
+**Fastest way:** paste `supabase/setup-all.sql` (all ten files in order) into the SQL editor of a **new, empty** project
 and run it once.
 
-**Upgrading a project that already ran the Phase 2 `setup-all.sql`:** do **not** run `setup-all.sql` again. Paste
-`supabase/phase3-upgrade.sql` (files 5 to 7 only) into Supabase > SQL Editor and run it **once**. It only adds new
-tables, functions and policies. Phase 2 tables and data are not touched.
+**Upgrading an existing project:** do **not** run `setup-all.sql` again. Run only the upgrade files you have not run yet,
+each **once**, in order, in Supabase > SQL Editor:
 
-After either option, run `supabase/verify.sql`. Every row's `result` must equal `expected` (11 rows).
+- `supabase/phase3-upgrade.sql` (files 5 to 7), if the project only has Phase 2.
+- `supabase/phase4-upgrade.sql` (files 8 to 10), if the project already has Phase 3.
+
+Upgrades only add tables, functions and policies (Phase 4 also swaps one Storage policy for a stricter one). Existing
+data is not touched.
+
+After either option, run `supabase/verify.sql`. Every row's `result` must equal `expected` (16 rows).
 
 `setup-all.sql` and `phase3-upgrade.sql` are generated from the migrations with `node scripts/build-sql-bundles.mjs`.
 Regenerate them after changing a migration.
@@ -153,6 +164,13 @@ npm run dev        # http://localhost:3000
 | Preserving records | A trigger refuses to delete any non-draft application, for every role. Cancelling records the time, reason and user, and keeps the reference number. Profiles with business records cannot be deleted (`on delete restrict`) |
 | Status history | Written by a trigger on every status change; nobody can insert, update or delete history rows |
 | Staff visibility of applications | BPLO personnel and administrators can read submitted and cancelled applications, never drafts |
+| Permit requirements | Configured per permit type by BPLO personnel and administrators (RLS). `created_by` / `updated_by` are set by a trigger; the permit type of a requirement cannot be changed; every create, update, activation and deactivation is audited. Applicants read only active requirements of permit types they have applied for. Sample rows cannot be activated until renamed |
+| Document files | Stored in the private `permit-documents` bucket at `{applicant}/{application}/{requirement}/{generated id}.{pdf,jpg,png}`. The original filename is never part of the path. Files are opened only through 60-second signed URLs created on the server for the owner or BPLO personnel |
+| Who may upload | Storage RLS lets an applicant create an object only at that path, for their own application, for an active requirement of its permit type, and only when allowed: any time while the application is a draft; after submission only for a requirement with no document yet, or one marked Needs Resubmission. Cancelled applications accept nothing |
+| File validation | Browser checks (quick feedback), then the server checks type and size before issuing a one-time upload URL, then reads the stored file's first bytes (PDF/JPEG/PNG signatures, so renamed executables are refused), then `register_application_document()` re-checks size and type from Storage's own metadata against the requirement. Any failure deletes the file, so no record or orphan file remains |
+| Document statuses | No insert or update grant on `application_documents` or `document_review_history`. Uploads always start as Uploaded (never auto-accepted). Only `review_application_document()`, callable by active BPLO personnel for submitted applications, changes a status; it records reviewer, time and comment, and requires a comment for Needs Resubmission |
+| Versions and history | Replacing a document keeps every earlier version (`is_current = false`) with its review outcome. Review history cannot be updated or deleted by anyone. Registered files cannot be deleted or overwritten through the API |
+| Who reads documents | The owner, and BPLO personnel for non-draft applications. Administrators manage requirements but do not open applicant files; department staff have no access yet |
 
 ## 9. Tests
 
@@ -162,10 +180,27 @@ npm run test:db        # migrations + RLS on an in-process Postgres (PGlite)
 npm run test:validation  # Zod schemas and redirect safety
 ```
 
-`test:db` (72 tests: 37 from Phase 2 and 35 for Phase 3) runs the real migration files on PGlite, with a small stand-in for Supabase's `auth` and `storage`
+`test:db` (95 tests: 37 Phase 2, 35 Phase 3, 23 Phase 4) runs the real migration files on PGlite, with a small stand-in for Supabase's `auth` and `storage`
 schemas. It verifies this project's tables, grants, policies and functions. It does **not** exercise Supabase Auth,
 email delivery or PostgREST. Those need a real project: register, confirm, sign in, reset a password, and
 change a role as an administrator, then check the **Audit log** page.
+
+**Phase 4 manual check on a real project** (passed type checking, lint and build; the Storage upload path has not
+yet been exercised against a real Supabase project):
+
+1. As BPLO personnel: **Permit Requirements**, pick a permit type, **Add requirement** (for example PDF only, 1 MB),
+   and check it is listed as Active. Try to activate a "Sample:" row without renaming it: it is refused.
+2. As an applicant with a draft of that permit type: **Documents** (or the application page > **Open requirements**).
+   Upload a small PDF: a progress bar shows, then the status becomes **Uploaded**. Try a `.docx` or a file over the limit:
+   it is refused with a message. Rename a `.txt` to `.pdf` and upload it: it is refused after upload and no record appears.
+3. Replace the document (a confirmation appears), submit the application, and check that the document can no longer be
+   replaced.
+4. As BPLO personnel: **Requirements Verification** lists the application. Open it, **View** the file, then mark it
+   **Needs Resubmission** with a comment.
+5. As the applicant: the comment appears; **Upload corrected document**; the new version shows as **Uploaded** and the
+   earlier version and its review are listed under **History**.
+6. As administrator: **Audit log** shows the requirement and document events. A second applicant opening the first
+   applicant's `/requirements` URL gets "not found".
 
 **Phase 3 manual check on a real project** (the screens have passed type checking, lint and a production build, but
 have not been clicked through against Supabase yet):
@@ -185,11 +220,25 @@ have not been clicked through against Supabase yet):
 - `log_self_event` lets a signed-in user add `user.login`, `user.logout` or `user.password_changed` entries about
   themselves; there is no rate limit on it yet.
 - Email address changes are not offered in the UI.
-- The `permit-documents` bucket limits (10 MB; PDF, JPEG, PNG) are provisional.
+- The `permit-documents` bucket allows at most 10 MB per file and only PDF, JPEG and PNG. Each requirement sets its own
+  limit up to 10 MB (default 5 MB).
 - The privacy notice at `/privacy` is a **draft** that the municipality's Data Protection Officer must review.
 - BPLO, department and head dashboards still show empty states. The BPLO application queue, verification and routing
   arrive in later phases. BPLO personnel can already search business profiles.
-- Document upload is not part of Phase 3. The `permit-documents` bucket is not linked to applications yet.
+- Requirements are not checked at submission: an applicant can still submit an application with required documents
+  missing (the checklist shows what is missing, and documents can be added after submission). Whether submission should
+  be blocked is a policy decision for the BPLO.
+- Requirements apply per permit type only. `permit_requirements.conditions` is reserved for future conditional rules
+  (for example by ownership type) and is not evaluated yet.
+- The seeded requirements are samples. Applicants see no checklist until BPLO personnel publish real requirements.
+- Document review is manual. There is no OCR or AI checking. Administrators cannot review documents.
+- Files are never deleted once recorded; there is no retention policy yet.
+- The file-content (magic-byte) check runs in the app's server action. A signed-in applicant who calls
+  `register_application_document` directly with their own session skips that one check; the database still enforces the
+  path, owner, requirement, size and declared type (PDF/JPEG/PNG only), and files are served with that declared type.
+- An applicant who starts an upload and closes the page before it finishes can leave an unregistered file in their own
+  folder. It is never shown or linked to an application.
+- Reviewer names are not shown to applicants ("BPLO personnel"), because applicants cannot read staff profiles.
 - Submitted applications cannot be corrected. A correction workflow is planned for a later phase. The applicant can
   cancel and start a new application.
 - Applicants may cancel their own submitted application (until review statuses exist). BPLO personnel and administrators
