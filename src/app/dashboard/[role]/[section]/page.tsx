@@ -13,13 +13,13 @@ import { PageHeader } from "@/components/ui/PageHeader";
 import { PhaseNotice } from "@/components/ui/Notices";
 import { RoleBadge, StatusPill } from "@/components/admin/AdminViews";
 import { requireRole } from "@/lib/auth/dal";
-import { isRoleId, ROLES, ROLE_ORDER, type RoleId } from "@/lib/roles";
+import { DEDICATED_SECTIONS, isRoleId, ROLES, ROLE_ORDER, type RoleId } from "@/lib/roles";
 
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
 
 export function generateStaticParams() {
   return ROLE_ORDER.flatMap((role) =>
-    ROLES[role].nav.filter((n) => n.slug).map((n) => ({ role, section: n.slug })),
+    ROLES[role].nav.filter((n) => n.slug && !DEDICATED_SECTIONS.has(n.slug)).map((n) => ({ role, section: n.slug })),
   );
 }
 

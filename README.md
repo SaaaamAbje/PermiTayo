@@ -9,7 +9,8 @@ system for the Municipality of Rosario, Batangas. **Development prototype**, not
 | --- | --- | --- |
 | 1 | UI foundation, layouts, navigation, role dashboards | Done |
 | 2 | Supabase database, authentication, role-based access control, user management | Implemented. See `docs/SETUP.md` |
-| 3+ | Permit applications, document processing, AI | Not started |
+| 3 | Business profiles, permit applications (draft, submit, cancel), reference numbers, applicant dashboard | Implemented. Upgrade existing projects with `supabase/phase3-upgrade.sql` (see `docs/SETUP.md`) |
+| 4+ | Document upload and verification, review workflow, AI | Not started |
 
 ## Quick start
 
@@ -29,14 +30,17 @@ Full configuration steps (migrations, auth settings, first administrator): **[do
 | `npm run lint` / `typecheck` | Static checks |
 | `npm test` | Validation tests and database/RLS tests |
 | `npm run provision:admin` | Create the first administrator (run on a trusted computer) |
+| `node scripts/build-sql-bundles.mjs` | Regenerate `supabase/setup-all.sql` and `supabase/phase3-upgrade.sql` from the migrations |
 
 ## Structure
 
 ```
 src/app/                 routes (login, register, password reset, /dashboard/[role]/...)
-src/components/          ui/, layout/, auth/, admin/, dashboards/
+src/components/          ui/, layout/, auth/, admin/, dashboards/, business/, applications/
 src/lib/auth/            session lookup (dal.ts), Zod schemas, server actions
 src/lib/admin/           administrator queries and actions
+src/lib/business/        business profile schemas, queries and actions
+src/lib/applications/    permit application schemas, queries and actions
 src/lib/supabase/        browser, server and proxy clients
 src/proxy.ts             session refresh and optimistic redirects
 supabase/migrations/     database schema, RLS and functions (apply in order)
