@@ -68,7 +68,10 @@ npx supabase db push
 2. **Sign In / Providers > Email**
    - Keep **Confirm email** turned **on**. Applicants must verify their address before they can sign in.
    - Set the minimum password length to 8 or more.
-3. **Email Templates.** Replace the link in two templates so they land on the app's confirmation route:
+3. **Email Templates.** Supabase only allows editing templates after **custom SMTP** is set up (step 4). Without it the
+   default templates are used: they still work, because Supabase confirms the address before redirecting to
+   `/auth/confirm`, and the app shows "Email confirmed" even when the link is opened on another device. Once SMTP is set
+   up, replace the link in two templates so links work on any device and password reset works everywhere:
    - *Confirm signup*
      ```html
      <h2>Confirm your email</h2>
@@ -79,8 +82,11 @@ npx supabase db push
      <h2>Reset your password</h2>
      <p><a href="{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=recovery&next=/reset-password">Choose a new password</a></p>
      ```
-4. **Email delivery.** Supabase's built-in email sender is heavily rate-limited and meant for testing. Configure your
-   own SMTP provider (Authentication > Emails > SMTP Settings) before real use.
+4. **Email delivery.** Supabase's built-in email sender is meant for testing only: it sends a few emails per hour and,
+   on newer projects, only to members of your Supabase organization. Configure your own SMTP provider (for example
+   Resend or Brevo) under Authentication > Emails > SMTP Settings before real applicants register. For testing, you can
+   confirm a user manually: Authentication > Users > the user > Confirm email, or in the SQL editor
+   `update auth.users set email_confirmed_at = now() where email = '...';`
 
 ## 4. Environment variables
 
