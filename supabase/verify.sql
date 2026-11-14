@@ -41,4 +41,27 @@ select 'application guard and history triggers present', count(*)::text, '5'
   from pg_trigger
   where not tgisinternal
     and tgname in ('permit_applications_guard_insert', 'permit_applications_guard_update', 'permit_applications_guard_delete',
-                   'permit_applications_record_status', 'business_establishments_guard_protected_columns');
+                   'permit_applications_record_status', 'business_establishments_guard_protected_columns')
+union all
+select 'phase 4 tables with row level security on', count(*)::text, '3'
+  from pg_tables
+  where schemaname = 'public' and rowsecurity
+    and tablename in ('permit_requirements', 'application_documents', 'document_review_history')
+union all
+select 'document functions present', count(*)::text, '3'
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname = 'public'
+    and p.proname in ('register_application_document', 'review_application_document', 'document_upload_allowed')
+union all
+select 'sample requirements seeded (inactive)', count(*)::text, '6'
+  from public.permit_requirements where name like 'Sample:%' and not is_active
+union all
+select 'document storage policies present', count(*)::text, '4'
+  from pg_policies
+  where schemaname = 'storage' and tablename = 'objects'
+    and policyname in ('Applicants upload allowed application documents', 'Applicants read own folder',
+                       'BPLO personnel read submitted application documents', 'Applicants remove unregistered uploads')
+union all
+select 'old broad upload policy removed', count(*)::text, '0'
+  from pg_policies
+  where schemaname = 'storage' and tablename = 'objects' and policyname = 'Applicants upload to own folder';

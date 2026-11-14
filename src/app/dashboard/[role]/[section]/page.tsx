@@ -6,6 +6,11 @@ import {
   AdminUsersView,
 } from "@/components/admin/AdminViews";
 import { ProfileForm } from "@/components/dashboards/ProfileView";
+import {
+  ApplicantDocumentsView,
+  RequirementsManagerView,
+  VerificationQueueView,
+} from "@/components/documents/DocumentViews";
 import { PageSkeleton } from "@/components/layout/ShellLoader";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
@@ -74,6 +79,12 @@ async function SectionBody({
         </Card>
       </div>
     );
+  }
+
+  if (role === "applicant" && section === "documents") return <ApplicantDocumentsView />;
+  if (role === "bplo" && section === "verification") return <VerificationQueueView searchParams={searchParams} />;
+  if ((role === "bplo" || role === "admin") && section === "requirements") {
+    return <RequirementsManagerView roleId={role} searchParams={searchParams} />;
   }
 
   if (role === "admin") {
