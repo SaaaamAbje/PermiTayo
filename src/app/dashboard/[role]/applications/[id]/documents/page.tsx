@@ -4,6 +4,9 @@ import { StaffDocumentsView } from "@/components/documents/DocumentViews";
 import { PageSkeleton } from "@/components/layout/ShellLoader";
 import { requireRole } from "@/lib/auth/dal";
 
+// Automated document checks run as server actions on this page, one document per request.
+export const maxDuration = 60;
+
 async function Body({ params }: PageProps<"/dashboard/[role]/applications/[id]/documents">) {
   const { role, id } = await params;
   if (role !== "bplo") notFound();

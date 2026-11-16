@@ -1,4 +1,4 @@
-# Permitayo setup guide (Phases 2 to 4: database, authentication, applications, requirements and documents)
+# Permitayo setup guide (Phases 2 to 5: database, authentication, applications, documents and automated checks)
 
 Permitayo needs a Supabase project for its database and sign-in. Until the
 environment variables below are set, the app runs but sign-in and registration are
@@ -33,8 +33,10 @@ The SQL lives in `supabase/migrations/` and must be applied **in filename order*
    `register_application_document` and `review_application_document` functions, and stricter Storage policies
    (replaces the Phase 2 "Applicants upload to own folder" policy)
 10. `20261114000003_seed_sample_requirements.sql` — six **sample, inactive** requirements (placeholders, not official)
+11. `20261116000001_document_verification.sql` — Phase 5: `document_verification_results`, `document_extracted_text`,
+    the queue/start/complete/fail functions, the applicant status function and RLS. Queues a check for every existing document
 
-**Fastest way:** paste `supabase/setup-all.sql` (all ten files in order) into the SQL editor of a **new, empty** project
+**Fastest way:** paste `supabase/setup-all.sql` (all eleven files in order) into the SQL editor of a **new, empty** project
 and run it once.
 
 **Upgrading an existing project:** do **not** run `setup-all.sql` again. Run only the upgrade files you have not run yet,
@@ -42,11 +44,12 @@ each **once**, in order, in Supabase > SQL Editor:
 
 - `supabase/phase3-upgrade.sql` (files 5 to 7), if the project only has Phase 2.
 - `supabase/phase4-upgrade.sql` (files 8 to 10), if the project already has Phase 3.
+- `supabase/phase5-upgrade.sql` (file 11), if the project already has Phase 4.
 
 Upgrades only add tables, functions and policies (Phase 4 also swaps one Storage policy for a stricter one). Existing
 data is not touched.
 
-After either option, run `supabase/verify.sql`. Every row's `result` must equal `expected` (16 rows).
+After either option, run `supabase/verify.sql`. Every row's `result` must equal `expected` (19 rows).
 
 `setup-all.sql` and `phase3-upgrade.sql` are generated from the migrations with `node scripts/build-sql-bundles.mjs`.
 Regenerate them after changing a migration.
@@ -100,9 +103,27 @@ cp .env.example .env.local
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | yes | anon/publishable key (protected by RLS) |
 | `NEXT_PUBLIC_SITE_URL` | yes | Base URL used in email links |
 | `SUPABASE_SERVICE_ROLE_KEY` | **never** | Only read by `scripts/create-admin.mjs` on your own computer |
+| `GEMINI_API_KEY` | **never** | Phase 5 automated document checks (OCR + AI). Server-side only |
+| `GEMINI_MODEL` | **never** | Optional model name; default `gemini-2.5-flash` |
 
 Do **not** set `SUPABASE_SERVICE_ROLE_KEY` on your hosting platform. The web application does not use it.
 `.env.local` is git-ignored.
+
+### Automated document checks (Phase 5)
+
+1. Create a key in **Google AI Studio** (https://aistudio.google.com) > **Get API key**.
+2. In Vercel > Settings > Environment Variables add `GEMINI_API_KEY` (type **Secret**; tick Production and Preview),
+   optionally `GEMINI_MODEL`, then redeploy. Never add a `NEXT_PUBLIC_` prefix.
+3. **Privacy.** Document images and text are sent to Google for analysis. On Gemini's **free tier** Google may use
+   submitted content to improve its products. Use a key from a project with **billing enabled** (paid tier) before
+   processing real applicants' documents, and have the Data Protection Officer approve this processing and update the
+   privacy notice.
+4. Without the key the feature still works partially: digital PDFs are read and file/readability rules run, but scanned
+   documents and images cannot be read and every result is **Inconclusive**.
+
+How checks run: every uploaded document version is queued automatically. On **Requirements Verification > (application)**,
+BPLO personnel click **Run automated checks** (or **Run check / Re-run check** per document). Each document is processed in
+its own request (up to 60 seconds) under the reviewer's own session; there is no background worker and no service-role key.
 
 ## 5. Create the first administrator
 
@@ -177,19 +198,41 @@ npm run dev        # http://localhost:3000
 | Document statuses | No insert or update grant on `application_documents` or `document_review_history`. Uploads always start as Uploaded (never auto-accepted). Only `review_application_document()`, callable by active BPLO personnel for submitted applications, changes a status; it records reviewer, time and comment, and requires a comment for Needs Resubmission |
 | Versions and history | Replacing a document keeps every earlier version (`is_current = false`) with its review outcome. Review history cannot be updated or deleted by anyone. Registered files cannot be deleted or overwritten through the API |
 | Who reads documents | The owner, and BPLO personnel for non-draft applications. Administrators manage requirements but do not open applicant files; department staff have no access yet |
+| Automated checks are advisory | Verification results live in their own tables. Nothing in Phase 5 can change `application_documents.document_status`; only `review_application_document()` (manual, BPLO) can. The overall result is computed by deterministic rules, not by the AI or its confidence score |
+| Who sees check results | Detailed results and extracted text: BPLO personnel only, and only for submitted/cancelled applications (RLS). Applicants get a bare status ("processing", "verification completed, manual review pending") from `applicant_document_checks()`; never findings, AI output or text. Administrators and department staff see nothing |
+| Who writes check results | No insert/update grants. Only BPLO personnel, through `start_` / `complete_` / `fail_document_verification()`; only the user who claimed a run can finish it; one queued or running attempt per document version (unique index); abandoned runs can be reclaimed after 10 minutes. Every attempt, including failures, is kept and audited |
+| AI provider | Called only from server code with `GEMINI_API_KEY` in a request header. Files are sent as inline bytes after being read under the reviewer's own Storage permissions; no public or signed URLs are shared. Output must match a strict Zod schema or the attempt fails as `invalid_response` |
+| Prompt injection | Document text and applicant-entered records are passed as delimited untrusted data; the model is told to ignore instructions inside them, has no tools, cannot change data, and its output is validated and never executed |
+| Logs | Processing errors log only an error type; document text is never logged; audit entries record outcome codes only |
 
 ## 9. Tests
 
 ```bash
-npm test               # both suites below
+npm test               # all three suites below
 npm run test:db        # migrations + RLS on an in-process Postgres (PGlite)
 npm run test:validation  # Zod schemas and redirect safety
+npm run test:verification  # Phase 5 pipeline: PDF extraction, OCR routing, rules, AI output validation, provider errors
 ```
 
-`test:db` (95 tests: 37 Phase 2, 35 Phase 3, 23 Phase 4) runs the real migration files on PGlite, with a small stand-in for Supabase's `auth` and `storage`
+`test:db` (105 tests: 37 Phase 2, 35 Phase 3, 23 Phase 4, 10 Phase 5) runs the real migration files on PGlite, with a small stand-in for Supabase's `auth` and `storage`
 schemas. It verifies this project's tables, grants, policies and functions. It does **not** exercise Supabase Auth,
 email delivery or PostgREST. Those need a real project: register, confirm, sign in, reset a password, and
 change a role as an administrator, then check the **Audit log** page.
+
+`test:verification` (20 tests) uses real PDFs generated during the test and real `unpdf` extraction, with **fake** OCR/AI
+providers and a fake network for the Gemini client. It does not call Google.
+
+**Phase 5 manual check on a real project** (not yet done; requires `GEMINI_API_KEY`):
+
+1. As an applicant, upload a digital PDF, a phone photo (JPG) and a scanned PDF to a draft, then submit it. The checklist
+   shows "automated check pending".
+2. As BPLO personnel, open the application under **Requirements Verification** and click **Run automated checks**.
+   Each document gets a result, findings grouped by category, and extracted information.
+3. Upload a document of the wrong kind (for example an electricity bill for a clearance) or one with an old expiry date and
+   check that a classification or expiration finding appears.
+4. Click **Re-run check**: a new attempt is added and the earlier one stays under "All attempts".
+5. Accept or ask for resubmission manually; confirm the AI result did not change the document status by itself.
+6. As the applicant, confirm only "Verification completed · manual review pending" is shown, with no AI details.
 
 **Phase 4 manual check on a real project** (passed type checking, lint and build; the Storage upload path has not
 yet been exercised against a real Supabase project):
@@ -245,6 +288,18 @@ have not been clicked through against Supabase yet):
 - An applicant who starts an upload and closes the page before it finishes can leave an unregistered file in their own
   folder. It is never shown or linked to an application.
 - Reviewer names are not shown to applicants ("BPLO personnel"), because applicants cannot read staff profiles.
+- Automated checks do not run by themselves. Uploads are queued; BPLO personnel start the checks from the review page
+  (there is no background worker, and the app deliberately holds no service-role key). Leaving the page stops a batch;
+  unfinished documents stay queued.
+- One document per request, within 60 seconds. Very large scanned PDFs (many pages) may time out and need a re-run;
+  PDFs over 50 pages are not checked automatically.
+- OCR and analysis use one provider (Gemini). The provider interfaces allow replacing either, but no second provider is
+  implemented. Results depend on the model and can be wrong; they are suggestions only.
+- Blur, rotation and cut-off detection come from the AI's visual observation (labelled as such), plus a simple
+  low-resolution rule; there is no dedicated image-processing check.
+- Checks never authenticate documents, signatures, seals or QR codes, and there is no conditional requirement logic yet.
+- Extracted text is kept indefinitely (no retention policy yet). Only BPLO personnel can read it.
+- The Phase 5 flow has not yet been run against Google's API or a real Supabase project from this development environment.
 - Submitted applications cannot be corrected. A correction workflow is planned for a later phase. The applicant can
   cancel and start a new application.
 - Applicants may cancel their own submitted application (until review statuses exist). BPLO personnel and administrators

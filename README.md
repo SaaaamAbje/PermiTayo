@@ -11,11 +11,14 @@ system for the Municipality of Rosario, Batangas. **Development prototype**, not
 | 2 | Supabase database, authentication, role-based access control, user management | Implemented. See `docs/SETUP.md` |
 | 3 | Business profiles, permit applications (draft, submit, cancel), reference numbers, applicant dashboard | Implemented. Upgrade existing projects with `supabase/phase3-upgrade.sql` (see `docs/SETUP.md`) |
 | 4 | Configurable permit requirements, private document upload and replacement, manual BPLO document review | Implemented; database rules tested (see below). Upgrade existing projects with `supabase/phase4-upgrade.sql` |
-| 5+ | AI document verification, OCR, routing, later phases | Not started |
+| 5 | Automated document checks: PDF text extraction, OCR and AI analysis (Gemini), deterministic rules, BPLO results panel, applicant processing status | Implemented; pipeline and database rules tested with fake AI providers. Needs `GEMINI_API_KEY`. Upgrade with `supabase/phase5-upgrade.sql` |
+| 6+ | Knowledge base, agentic workflows, routing, departmental review, notifications, reports | Not started |
 
-Phase 4 testing: the database and Storage rules (95 tests) and input validation (31 tests) are automated and pass. The
-upload, preview and review screens pass type checking, lint and a production build but have not yet been exercised
-against a live Supabase project; use the manual check in `docs/SETUP.md` section 9.
+Testing: database and Storage rules (105 tests), input validation (31) and the Phase 5 verification pipeline (20, with
+fake OCR/AI providers) are automated and pass. The upload, review and automated-check screens pass type checking, lint
+and a production build but have not yet been exercised against a live Supabase project or Google's API; use the manual
+checks in `docs/SETUP.md` section 9. Automated checks are suggestions for BPLO personnel and never accept or reject
+anything.
 
 ## Quick start
 
@@ -33,7 +36,7 @@ Full configuration steps (migrations, auth settings, first administrator): **[do
 | --- | --- |
 | `npm run dev` / `build` / `start` | Next.js |
 | `npm run lint` / `typecheck` | Static checks |
-| `npm test` | Validation tests and database/RLS tests |
+| `npm test` | Validation, verification-pipeline and database/RLS tests |
 | `npm run provision:admin` | Create the first administrator (run on a trusted computer) |
 | `node scripts/build-sql-bundles.mjs` | Regenerate `supabase/setup-all.sql` and the `supabase/phaseN-upgrade.sql` files from the migrations |
 
@@ -41,12 +44,13 @@ Full configuration steps (migrations, auth settings, first administrator): **[do
 
 ```
 src/app/                 routes (login, register, password reset, /dashboard/[role]/...)
-src/components/          ui/, layout/, auth/, admin/, dashboards/, business/, applications/, documents/
+src/components/          ui/, layout/, auth/, admin/, dashboards/, business/, applications/, documents/, verification/
 src/lib/auth/            session lookup (dal.ts), Zod schemas, server actions
 src/lib/admin/           administrator queries and actions
 src/lib/business/        business profile schemas, queries and actions
 src/lib/applications/    permit application schemas, queries and actions
 src/lib/documents/       requirement and document schemas, queries, actions and file-type checks
+src/lib/verification/    Phase 5: extraction, OCR/AI providers, prompts, rules engine, pipeline, service, actions
 src/lib/supabase/        browser, server and proxy clients
 src/proxy.ts             session refresh and optimistic redirects
 supabase/migrations/     database schema, RLS and functions (apply in order)

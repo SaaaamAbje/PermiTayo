@@ -14,6 +14,9 @@ import type { Database, DbApplicationStatus } from "@/lib/database.types";
 type RequirementRow = Database["public"]["Tables"]["permit_requirements"]["Row"];
 type DocumentRow = Database["public"]["Tables"]["application_documents"]["Row"];
 type ReviewRow = Database["public"]["Tables"]["document_review_history"]["Row"];
+export type VerificationRow = Database["public"]["Tables"]["document_verification_results"]["Row"];
+export type ExtractedPages = Database["public"]["Tables"]["document_extracted_text"]["Row"]["pages"];
+export type ApplicantCheckStatus = Database["public"]["Tables"]["document_verification_results"]["Row"]["processing_status"];
 
 export const VERIFICATION_PAGE_SIZE = 15;
 
@@ -81,6 +84,14 @@ export interface ChecklistItem {
   previous: DocumentRow[];
   /** Review history per document id, oldest first. */
   reviews: Record<string, ReviewRow[]>;
+  /** BPLO only: automated check attempts per document id, newest first. */
+  verifications: Record<string, VerificationRow[]>;
+  /** BPLO only: extracted text of the latest completed check of the current version. */
+  extractedText: ExtractedPages | null;
+  /** Applicant only: simplified status of the latest automated check of the current version. */
+  checkStatus: ApplicantCheckStatus | null;
+  /** BPLO only: the latest check of the current version has been "processing" for over 10 minutes (abandoned). */
+  latestCheckStale: boolean;
 }
 
 export interface ChecklistSummary {
@@ -91,7 +102,10 @@ export interface ChecklistSummary {
   awaitingReview: number;
 }
 
-async function loadChecklist(applicationId: string, permitTypeId: string) {
+const VERIFICATION_COLUMNS =
+  "id, application_document_id, attempt_number, processing_status, overall_result, detected_document_type, expected_document_type, classification_match, confidence_score, extracted_fields, findings, quality, summary, extraction_method, page_count, ai_provider, ai_model, error_code, error_message, requested_by, processed_by, processing_started_at, processed_at, created_at, updated_at";
+
+async function loadChecklist(applicationId: string, permitTypeId: string, viewer: "applicant" | "bplo") {
   const supabase = await createClient();
   const [reqs, docs] = await Promise.all([
     supabase.from("permit_requirements").select(REQUIREMENT_COLUMNS).eq("permit_type_id", permitTypeId).order("display_order").order("name"),
@@ -116,6 +130,32 @@ async function loadChecklist(applicationId: string, permitTypeId: string) {
     reviews = data ?? [];
   }
 
+  // Automated checks: full detail for BPLO personnel (RLS), a bare status for the applicant.
+  let verifications: VerificationRow[] = [];
+  const texts = new Map<string, ExtractedPages>();
+  const applicantChecks = new Map<string, ApplicantCheckStatus>();
+  if (viewer === "bplo" && docIds.length > 0) {
+    const { data, error } = await supabase
+      .from("document_verification_results")
+      .select(VERIFICATION_COLUMNS)
+      .in("application_document_id", docIds)
+      .order("attempt_number", { ascending: false });
+    if (error) throw new Error("Could not load automated check results.");
+    verifications = data ?? [];
+    const latestCompleted = documents
+      .filter((d) => d.is_current)
+      .map((d) => verifications.find((v) => v.application_document_id === d.id && v.processing_status === "completed")?.id)
+      .filter((id): id is string => Boolean(id));
+    if (latestCompleted.length > 0) {
+      const { data: t } = await supabase.from("document_extracted_text").select("verification_result_id, pages").in("verification_result_id", latestCompleted);
+      for (const row of t ?? []) texts.set(row.verification_result_id, row.pages);
+    }
+  } else if (viewer === "applicant") {
+    const { data } = await supabase.rpc("applicant_document_checks", { p_application: applicationId });
+    for (const row of data ?? []) applicantChecks.set(row.application_document_id, row.processing_status);
+  }
+
+  const staleBefore = Date.now() - 10 * 60 * 1000;
   const withDocs = new Set(documents.map((d) => d.requirement_id));
   // Active requirements, plus inactive ones this application already has files for.
   const requirements = (reqs.data ?? []).filter((r) => r.is_active || withDocs.has(r.id));
@@ -124,11 +164,23 @@ async function loadChecklist(applicationId: string, permitTypeId: string) {
     const versions = documents.filter((d) => d.requirement_id === requirement.id);
     const reviewMap: Record<string, ReviewRow[]> = {};
     for (const v of versions) reviewMap[v.id] = reviews.filter((r) => r.application_document_id === v.id);
+    const current = versions.find((d) => d.is_current) ?? null;
+    const verificationMap: Record<string, VerificationRow[]> = {};
+    for (const v of versions) verificationMap[v.id] = verifications.filter((x) => x.application_document_id === v.id);
+    const latestCompleted = current ? verificationMap[current.id]?.find((x) => x.processing_status === "completed") : undefined;
     return {
       requirement,
-      current: versions.find((d) => d.is_current) ?? null,
+      current,
       previous: versions.filter((d) => !d.is_current),
       reviews: reviewMap,
+      verifications: verificationMap,
+      extractedText: latestCompleted ? texts.get(latestCompleted.id) ?? null : null,
+      checkStatus: current ? applicantChecks.get(current.id) ?? null : null,
+      latestCheckStale: Boolean(
+        current &&
+          verificationMap[current.id]?.[0]?.processing_status === "processing" &&
+          Date.parse(verificationMap[current.id][0].processing_started_at ?? "") < staleBefore,
+      ),
     };
   });
 
@@ -162,7 +214,7 @@ export async function getApplicantChecklist(applicationId: string) {
     .maybeSingle();
   if (error) throw new Error("Could not load this application.");
   if (!app) return null;
-  const checklist = await loadChecklist(app.id, app.permit_type_id);
+  const checklist = await loadChecklist(app.id, app.permit_type_id, "applicant");
   return { app, ...checklist };
 }
 
@@ -174,7 +226,7 @@ export async function getStaffChecklist(applicationId: string) {
   const { data: app, error } = await supabase.from("permit_applications").select(APP_COLUMNS).eq("id", applicationId).maybeSingle();
   if (error) throw new Error("Could not load this application.");
   if (!app) return null;
-  const checklist = await loadChecklist(app.id, app.permit_type_id);
+  const checklist = await loadChecklist(app.id, app.permit_type_id, "bplo");
   return { app, ...checklist };
 }
 
