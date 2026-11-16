@@ -28,6 +28,8 @@ import { ApplicationStatusBadge } from "@/components/applications/StatusBadges";
 import { first, type SearchParams } from "@/components/business/BusinessViews";
 import { ChecklistSummaryBar, DocumentChecklist } from "./DocumentChecklist";
 import { RequirementToggle } from "./RequirementToggle";
+import { RunQueuedChecks } from "@/components/verification/RunQueuedChecks";
+import { aiConfigured } from "@/lib/verification/service";
 
 function SavedNotice({ text }: { text: string }) {
   return <p role="status" className="mb-6 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-800">{text}</p>;
@@ -325,7 +327,24 @@ export async function StaffDocumentsView({ id }: { id: string }) {
           ) : null}
         </CardBody>
       </Card>
-      <DocumentChecklist data={data} mode="bplo" viewerId={user.id} />
+      {app.application_status === "submitted" ? (
+        <Card>
+          <CardBody className="space-y-2">
+            <p className="text-sm text-slate-700">
+              <span className="font-semibold text-slate-900">Automated checks</span> read each document, compare it with the requirement and the
+              application, and list possible issues. They are suggestions only and never accept or reject anything.
+            </p>
+            <RunQueuedChecks
+              applicationId={app.id}
+              queued={data.items.flatMap((i) => {
+                const latest = i.current ? i.verifications[i.current.id]?.[0] : undefined;
+                return latest && latest.processing_status === "queued" ? [{ verificationId: latest.id, label: i.requirement.name }] : [];
+              })}
+            />
+          </CardBody>
+        </Card>
+      ) : null}
+      <DocumentChecklist data={data} mode="bplo" viewerId={user.id} aiConfigured={aiConfigured()} />
     </div>
   );
 }

@@ -15,6 +15,8 @@ import { ProgressBar } from "@/components/ui/Progress";
 import { DocumentLinks } from "./DocumentLinks";
 import { DocumentUploader } from "./DocumentUploader";
 import { ReviewForm } from "./ReviewForm";
+import { VerificationPanel } from "@/components/verification/VerificationPanel";
+import { applicantProcessingLabel } from "@/lib/verification/labels";
 
 export function DocumentStatusBadge({ status }: { status: ChecklistStatus }) {
   return <Badge tone={DOCUMENT_STATUS_TONES[status]}>{DOCUMENT_STATUS_LABELS[status]}</Badge>;
@@ -62,10 +64,13 @@ export function DocumentChecklist({
   data,
   mode,
   viewerId,
+  aiConfigured = false,
 }: {
   data: ChecklistData;
   mode: "applicant" | "bplo";
   viewerId: string;
+  /** BPLO view: whether an AI provider key is configured on the server. */
+  aiConfigured?: boolean;
 }) {
   const { app, items } = data;
   const appStatus = app.application_status;
@@ -132,6 +137,12 @@ export function DocumentChecklist({
                   <p className="text-sm text-slate-500">No file uploaded yet.</p>
                 )}
 
+                {mode === "applicant" && current ? (
+                  <p className="text-xs text-slate-600">
+                    <span className="font-medium text-slate-700">Processing:</span> {applicantProcessingLabel(item.checkStatus, current.document_status)}
+                  </p>
+                ) : null}
+
                 {current?.review_comment ? (
                   <div
                     className={
@@ -177,6 +188,7 @@ export function DocumentChecklist({
                     <p className="text-xs text-slate-500">
                       Accepted: {formatAcceptedTypes(r.accepted_file_types)} · up to {formatFileSize(r.max_file_size)}
                     </p>
+                    {current ? <VerificationPanel item={item} applicationId={app.id} canRun={appStatus === "submitted"} aiConfigured={aiConfigured} /> : null}
                     {current && appStatus === "submitted" ? (
                       <ReviewForm key={`${current.id}-${current.document_status}`} documentId={current.id} applicationId={app.id} current={current.document_status} />
                     ) : !current ? (

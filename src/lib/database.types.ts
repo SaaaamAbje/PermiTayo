@@ -1,5 +1,5 @@
 /**
- * Hand-written types for the Phase 2, 3 and 4 schema (supabase/migrations).
+ * Hand-written types for the Phase 2 to 5 schema (supabase/migrations).
  * Replace with generated types (`supabase gen types typescript`) once a
  * project is linked; the shape below matches that output.
  */
@@ -19,6 +19,21 @@ export type BusinessRecordStatus = "pending_verification" | "active" | "inactive
 export type DbApplicationStatus = "draft" | "submitted" | "cancelled";
 export type DocumentStatus = "uploaded" | "under_review" | "accepted" | "needs_resubmission";
 export type DocumentMimeType = "application/pdf" | "image/jpeg" | "image/png";
+export type VerificationProcessingStatus = "queued" | "processing" | "completed" | "failed";
+export type VerificationOverallResult = "passed" | "needs_review" | "failed" | "inconclusive";
+
+/** Stored finding (see src/lib/verification/schemas.ts). */
+export type StoredFinding = {
+  category: "classification" | "completeness" | "consistency" | "expiration" | "readability" | "technical";
+  severity: "low" | "medium" | "high" | "critical";
+  field: string | null;
+  description: string;
+  evidence: string | null;
+  recommendation: string;
+  source_page: number | null;
+  source: "rules" | "ai";
+};
+export type StoredExtractedField = { field: string; value: string; source_page: number | null; confidence: number };
 
 /** Columns BPLO personnel and administrators may write on permit_requirements. */
 export type RequirementWritable = {
@@ -376,6 +391,65 @@ export type Database = {
           },
         ];
       };
+      document_verification_results: {
+        Row: {
+          id: string;
+          application_document_id: string;
+          attempt_number: number;
+          processing_status: VerificationProcessingStatus;
+          overall_result: VerificationOverallResult | null;
+          detected_document_type: string | null;
+          expected_document_type: string | null;
+          classification_match: boolean | null;
+          confidence_score: number | null;
+          extracted_fields: StoredExtractedField[];
+          findings: StoredFinding[];
+          quality: Record<string, unknown>;
+          summary: string | null;
+          extraction_method: "pdf_text" | "ocr" | "pdf_text_and_ocr" | "none" | null;
+          page_count: number | null;
+          ai_provider: string | null;
+          ai_model: string | null;
+          error_code: string | null;
+          error_message: string | null;
+          requested_by: string | null;
+          processed_by: string | null;
+          processing_started_at: string | null;
+          processed_at: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: never;
+        Update: never;
+        Relationships: [
+          {
+            foreignKeyName: "document_verification_results_application_document_id_fkey";
+            columns: ["application_document_id"];
+            isOneToOne: false;
+            referencedRelation: "application_documents";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      document_extracted_text: {
+        Row: {
+          verification_result_id: string;
+          pages: { page: number; text: string; source: "pdf_text" | "ocr" }[];
+          character_count: number;
+          created_at: string;
+        };
+        Insert: never;
+        Update: never;
+        Relationships: [
+          {
+            foreignKeyName: "document_extracted_text_verification_result_id_fkey";
+            columns: ["verification_result_id"];
+            isOneToOne: true;
+            referencedRelation: "document_verification_results";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
     };
     Views: { [_ in never]: never };
     Functions: {
@@ -396,6 +470,14 @@ export type Database = {
       };
       review_application_document: { Args: { p_document: string; p_status: string; p_comment?: string | null }; Returns: undefined };
       document_upload_allowed: { Args: { p_application: string; p_requirement: string }; Returns: boolean };
+      request_document_verification: { Args: { p_document: string }; Returns: string };
+      start_document_verification: { Args: { p_verification: string }; Returns: undefined };
+      complete_document_verification: { Args: { p_verification: string; p_result: unknown; p_pages: unknown }; Returns: undefined };
+      fail_document_verification: { Args: { p_verification: string; p_error_code: string; p_error_message: string }; Returns: undefined };
+      applicant_document_checks: {
+        Args: { p_application: string };
+        Returns: { application_document_id: string; processing_status: VerificationProcessingStatus }[];
+      };
     };
     Enums: { [_ in never]: never };
     CompositeTypes: { [_ in never]: never };

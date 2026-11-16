@@ -64,4 +64,19 @@ select 'document storage policies present', count(*)::text, '4'
 union all
 select 'old broad upload policy removed', count(*)::text, '0'
   from pg_policies
-  where schemaname = 'storage' and tablename = 'objects' and policyname = 'Applicants upload to own folder';
+  where schemaname = 'storage' and tablename = 'objects' and policyname = 'Applicants upload to own folder'
+union all
+select 'phase 5 tables with row level security on', count(*)::text, '2'
+  from pg_tables
+  where schemaname = 'public' and rowsecurity
+    and tablename in ('document_verification_results', 'document_extracted_text')
+union all
+select 'verification functions present', count(*)::text, '5'
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname = 'public'
+    and p.proname in ('request_document_verification', 'start_document_verification', 'complete_document_verification',
+                      'fail_document_verification', 'applicant_document_checks')
+union all
+select 'every document has a verification record', count(*)::text, '0'
+  from public.application_documents d
+  where not exists (select 1 from public.document_verification_results v where v.application_document_id = d.id);

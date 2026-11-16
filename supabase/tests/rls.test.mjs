@@ -1230,6 +1230,141 @@ await test("P4-14. a deactivated requirement keeps its uploaded documents visibl
 });
 
 // ---------------------------------------------------------------------------
+// I. Phase 5: AI-assisted document verification (database rules)
+// ---------------------------------------------------------------------------
+const bplo5 = await makeUser("bplo5", { role: "bplo_personnel" });
+const verifications = (docId) =>
+  q(`select id, attempt_number, processing_status, overall_result from public.document_verification_results where application_document_id = $1 order by attempt_number`, [docId]);
+const rpc = (userId, sql, params) => as(userId, async () => (await q(sql, params))[0]);
+const sampleResult = (overrides = {}) => ({
+  overall_result: "needs_review",
+  detected_document_type: "Barangay clearance",
+  expected_document_type: "Barangay clearance (test)",
+  classification_match: true,
+  confidence_score: 0.8,
+  extracted_fields: [{ field: "business_name", value: "Phase Four Store", source_page: 1, confidence: 0.9 }],
+  findings: [{ category: "consistency", severity: "medium", field: "business_name", description: "d", evidence: "e", recommendation: "r", source: "rules" }],
+  quality: {},
+  summary: "Readable; one discrepancy.",
+  extraction_method: "pdf_text",
+  page_count: 1,
+  ai_provider: "gemini",
+  ai_model: "test-model",
+  ...overrides,
+});
+
+let v1;
+await test("P5-13. every uploaded version gets exactly one queued check automatically", async () => {
+  const rows = await verifications(docA3.id);
+  eq(rows.length, 1, "one attempt");
+  eq(rows[0].processing_status, "queued");
+  v1 = rows[0].id;
+  eq((await verifications(docA2.id)).length, 1, "older version has its own record");
+  assert((await verifications(docA2.id))[0].id !== v1, "separate records per version");
+});
+
+await test("P5-13. requesting a check while one is queued returns it instead of creating a duplicate", async () => {
+  const r = await rpc(bplo4, `select public.request_document_verification($1) as id`, [docA3.id]);
+  eq(r.id, v1);
+  eq((await verifications(docA3.id)).length, 1);
+});
+
+await test("P5-13. a running check cannot be started twice; abandoned runs can be reclaimed after 10 minutes", async () => {
+  await as(bplo4, () => db.query(`select public.start_document_verification($1)`, [v1]));
+  eq((await verifications(docA3.id))[0].processing_status, "processing");
+  await as(bplo5, () => rejects(() => db.query(`select public.start_document_verification($1)`, [v1]), /already being checked/));
+  await db.query(`update public.document_verification_results set processing_started_at = now() - interval '11 minutes' where id = $1`, [v1]);
+  await as(bplo5, () => db.query(`select public.start_document_verification($1)`, [v1]));
+  await as(bplo4, () =>
+    rejects(() => db.query(`select public.complete_document_verification($1, $2::jsonb, '[]'::jsonb)`, [v1, JSON.stringify(sampleResult())]), /not running/, "only the current runner may finish it"),
+  );
+});
+
+await test("P5-11. malformed results are refused by the database", async () => {
+  for (const bad of [sampleResult({ overall_result: "approved" }), sampleResult({ findings: "none" }), sampleResult({ confidence_score: 7 })]) {
+    await as(bplo5, () => rejects(() => db.query(`select public.complete_document_verification($1, $2::jsonb, '[]'::jsonb)`, [v1, JSON.stringify(bad)]), /Invalid verification result|verification_confidence_range/));
+  }
+  eq((await verifications(docA3.id))[0].processing_status, "processing", "still running after refused results");
+});
+
+await test("P5-18. a completed check is stored, audited, and does NOT change the official document status", async () => {
+  const before = (await docRow(docA3.id)).document_status;
+  await as(bplo5, () =>
+    db.query(`select public.complete_document_verification($1, $2::jsonb, $3::jsonb)`, [
+      v1,
+      JSON.stringify(sampleResult({ overall_result: "passed" })),
+      JSON.stringify([{ page: 1, text: "BARANGAY CLEARANCE Phase Four Store", source: "pdf_text" }]),
+    ]),
+  );
+  const [row] = await q(`select processing_status, overall_result, processed_by, confidence_score from public.document_verification_results where id = $1`, [v1]);
+  eq(row.processing_status, "completed");
+  eq(row.overall_result, "passed");
+  eq(row.processed_by, bplo5);
+  eq((await q(`select character_count from public.document_extracted_text where verification_result_id = $1`, [v1]))[0].character_count, 35);
+  eq((await docRow(docA3.id)).document_status, before, "AI 'passed' is not an acceptance");
+  eq(await auditCount("verification.completed", docA3.id), 1);
+  await as(bplo5, () => rejects(() => db.query(`select public.start_document_verification($1)`, [v1]), /has finished/));
+});
+
+await test("P5-12/13. reprocessing creates a new attempt; failed attempts are kept with their error", async () => {
+  const v2 = (await rpc(bplo4, `select public.request_document_verification($1) as id`, [docA3.id])).id;
+  assert(v2 !== v1, "new attempt");
+  await as(bplo4, () => db.query(`select public.start_document_verification($1)`, [v2]));
+  await as(bplo4, () => rejects(() => db.query(`select public.fail_document_verification($1, 'Bad Code!', 'x')`, [v2]), /Invalid error code/));
+  await as(bplo4, () => db.query(`select public.fail_document_verification($1, 'rate_limited', 'The AI provider is busy.')`, [v2]));
+  const rows = await verifications(docA3.id);
+  eq(rows.map((r) => `${r.attempt_number}:${r.processing_status}`).join(","), "1:completed,2:failed");
+  eq(await auditCount("verification.failed", docA3.id), 1);
+  eq(await auditCount("verification.requested", docA3.id), 1);
+  const v3 = (await rpc(bplo4, `select public.request_document_verification($1) as id`, [docA3.id])).id;
+  eq((await verifications(docA3.id)).length, 3, "third attempt queued after a failure");
+  assert(v3 !== v2);
+});
+
+await test("P5-17. BPLO personnel can still review manually whatever the AI result", async () => {
+  await review(bplo4, docA3.id, "needs_resubmission", "Manual decision differs from the automated check.");
+  eq((await docRow(docA3.id)).document_status, "needs_resubmission");
+});
+
+await test("P5-15. applicants see only a simplified status of their own documents, never results or text", async () => {
+  await as(appl4a, async () => {
+    eq(await count(`select 1 from public.document_verification_results`), 0, "no detailed results");
+    eq(await count(`select 1 from public.document_extracted_text`), 0, "no extracted text");
+    const own = await q(`select application_document_id, processing_status from public.applicant_document_checks($1)`, [draftA.id]);
+    assert(own.length >= 2, "own statuses returned");
+    assert(own.every((r) => Object.keys(r).length === 2), "only document id and processing status");
+    const latest = own.find((r) => r.application_document_id === docA3.id);
+    eq(latest.processing_status, "queued", "latest attempt only");
+  });
+  await as(appl4b, async () => eq((await q(`select * from public.applicant_document_checks($1)`, [draftA.id])).length, 0, "other applicant gets nothing"));
+});
+
+await test("P5-16. administrators, department staff and applicants cannot read results or run checks", async () => {
+  for (const user of [admin4, dept4, appl4a]) {
+    await as(user, async () => {
+      eq(await count(`select 1 from public.document_verification_results`), 0);
+      eq(await count(`select 1 from public.document_extracted_text`), 0);
+      await rejects(() => db.query(`select public.request_document_verification($1)`, [docA3.id]), /Only BPLO personnel/);
+    });
+  }
+  await as(appl4a, async () => {
+    await rejects(() => db.query(`insert into public.document_verification_results (application_document_id, attempt_number) values ($1, 99)`, [docA3.id]), /permission denied/);
+    await rejects(() => db.query(`update public.document_verification_results set overall_result = 'passed'`), /permission denied/);
+  });
+  await as(bplo5, async () => assert((await count(`select 1 from public.document_extracted_text`)) >= 1, "BPLO can read extracted text"));
+});
+
+await test("P5-16. documents of draft applications cannot be checked or seen by BPLO", async () => {
+  const d = await createDraft(appl4a, bizA.id, NEW_TYPE);
+  const doc = await uploadDoc(appl4a, d.id, reqNewA.id);
+  eq((await verifications(doc.id)).length, 1, "queued on upload even for drafts");
+  await rejects(() => as(bplo4, () => db.query(`select public.request_document_verification($1)`, [doc.id])), /submitted applications/);
+  const [v] = await verifications(doc.id);
+  await rejects(() => as(bplo4, () => db.query(`select public.start_document_verification($1)`, [v.id])), /submitted applications/);
+  await as(bplo4, async () => eq(await count(`select 1 from public.document_verification_results where id = $1`, [v.id]), 0, "hidden while draft"));
+});
+
+// ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
 let failed = 0;
